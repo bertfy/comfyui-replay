@@ -783,6 +783,17 @@
 
     <div class="option-row">
       <div class="option-meta">
+        <div class="option-label">Animate Combo Selection</div>
+        <div class="option-desc">For Vue-rendered nodes, cursor visits the combo widget, opens its dropdown, and clicks the target option — driving the real PrimeVue Select. Falls back to silent set if the node isn't a Vue node.</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="combo-ui-toggle" checked>
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
         <div class="option-label">Resize Duration</div>
         <div class="option-desc">How long the resize animation runs</div>
       </div>
@@ -935,6 +946,7 @@
     let showDebugLog = false;
     let showCaptions = false;
     let useNodeResize = true;
+    let useComboUI = true;
     let resizeDuration = 500;
     let resizeEasing = 'cubic';
     let resizeStart = 'default';
@@ -1069,6 +1081,7 @@
   const __TIP_T = 'translate(' + (-TIP_X) + 'px,' + (-TIP_Y) + 'px)';
   const SHOW_CAPTIONS = ${showCaptions};
   const USE_NODE_RESIZE = ${useNodeResize};
+  const USE_COMBO_UI = ${useComboUI};
   const RESIZE_DURATION = ${resizeDuration};
   const RESIZE_EASING = '${resizeEasing}';
   const RESIZE_START = '${resizeStart}';
@@ -1212,39 +1225,320 @@
     Object.assign(l.style,{position:'fixed',left:(cx+30)+'px',top:(cy-10)+'px',background:'rgba(0,0,0,.8)',color:'#00d4ff',padding:'4px 10px',borderRadius:'6px',fontSize:'13px',fontFamily:'system-ui',fontWeight:'500',pointerEvents:'none',zIndex:'999999',whiteSpace:isVO?'normal':'nowrap',maxWidth:isVO?'300px':'none',animation:'__rlb '+dur+'ms ease-in-out forwards'});
     ov.appendChild(l);setTimeout(()=>l.remove(),dur);}
 
-  async function typeInWidget(node,wi,text){
-    if(!node.widgets||!node.widgets[wi])return;
-    const w=node.widgets[wi];
-    const wy=(w.last_y!==undefined)?w.last_y+10:(30+wi*20);
-    const ns=c2s(node.pos[0]+node.size[0]/2,node.pos[1]+wy);
-    await moveTo(ns.x,ns.y,300);ripple();await slp(200);
-    w.value='';const s=String(text);
-    let curVis=true;const curBlink=setInterval(()=>{curVis=!curVis;const base=w.value.endsWith('|')?w.value.slice(0,-1):w.value;w.value=curVis?base+'|':base;app.canvas.setDirty(true,true);},400);
-    for(let i=0;i<s.length;i++){if(window.__replayStop){clearInterval(curBlink);w.value=s;return;}w.value=s.slice(0,i+1)+'|';curVis=true;app.canvas.setDirty(true,true);await slp(25+Math.random()*40);}
-    clearInterval(curBlink);w.value=s;app.canvas.setDirty(true,true);
-    try{w.callback?.(w.value);}catch(e){}app.canvas.setDirty(true,true);}
-
-  async function clickWidgetArrow(node,wi,v){
-    if(!node.widgets||!node.widgets[wi])return;
-    const w=node.widgets[wi];
-    const wy=(w.last_y!==undefined)?w.last_y+10:(30+wi*20);
-    const ns=c2s(node.pos[0]+node.size[0]-20,node.pos[1]+wy);
-    await moveTo(ns.x,ns.y,300);
-    ripple();
-    await slp(100);
-    if(Math.random()>0.5){ripple();await slp(100);}
-    w.value=v;try{w.callback?.(v);}catch(e){}app.canvas.setDirty(true,true);
+  // Find the DOM input/textarea for a widget on a Vue-rendered node.
+  // Tries: direct aria-label on input, container with aria-label, then
+  // <label for=...> with matching text. Returns null if no match — the
+  // node is canvas-painted or the widget has no DOM representation
+  // (e.g., currently collapsed under "Show advanced inputs").
+  function findDomInputForWidget(nodeEl, widgetName) {
+    if (!nodeEl || !widgetName) return null;
+    const safe = widgetName.replace(/"/g, '\\"');
+    let el = nodeEl.querySelector('textarea[aria-label="' + safe + '"], input[aria-label="' + safe + '"]');
+    if (el) return el;
+    for (const c of nodeEl.querySelectorAll('[aria-label="' + safe + '"]')) {
+      if (c.matches('input, textarea')) return c;
+      const inner = c.querySelector('input, textarea');
+      if (inner) return inner;
+    }
+    for (const lab of nodeEl.querySelectorAll('label')) {
+      if (lab.textContent.trim() === widgetName && lab.htmlFor) {
+        const t = nodeEl.querySelector('#' + CSS.escape(lab.htmlFor));
+        if (t && t.matches('input, textarea')) return t;
+      }
+    }
+    return null;
   }
 
-  async function clickWidget(node,wi,v){
-    if(!node.widgets||!node.widgets[wi])return;
-    const w=node.widgets[wi];
-    const wy=(w.last_y!==undefined)?w.last_y+10:(30+wi*20);
-    const ns=c2s(node.pos[0]+node.size[0]/2,node.pos[1]+wy);
-    await moveTo(ns.x,ns.y,300);
+  // Type a value into a DOM input/textarea char-by-char. Visits the
+  // element with the animated cursor first, focuses, types each
+  // character with an InputEvent so Vue propagates reactively, then
+  // dispatches a final change event. Used for both text widgets
+  // (prompt) and numeric inputs (seed).
+  async function typeIntoDomInput(domEl, value) {
+    if (!domEl) return false;
+    const str = String(value);
+    const r = domEl.getBoundingClientRect();
+    await moveTo(r.left + r.width / 2, r.top + r.height / 2, 250);
+    ripple();
+    await slp(120);
+    try { domEl.focus(); } catch (e) {}
+    await slp(40);
+    domEl.value = '';
+    domEl.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+    await slp(40);
+    for (let i = 0; i < str.length; i++) {
+      if (window.__replayStop) break;
+      domEl.value = str.slice(0, i + 1);
+      domEl.dispatchEvent(new InputEvent('input', {
+        bubbles: true, cancelable: true,
+        data: str[i], inputType: 'insertText',
+      }));
+      await slp(25 + Math.random() * 30);
+    }
+    domEl.value = str;
+    domEl.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+    try { domEl.blur(); } catch (e) {}
+    return true;
+  }
+
+  // Type a value into a widget. Tries the DOM path first (for Vue-
+  // rendered nodes — the real textarea/input updates visibly), falls
+  // back to the canvas-painted blinking-cursor animation for plain
+  // LiteGraph widgets. Skips entirely if the widget is already at
+  // the target value.
+  async function typeInWidget(node, wi, text) {
+    if (!node.widgets || !node.widgets[wi]) return;
+    const w = node.widgets[wi];
+    if (String(w.value) === String(text)) return;  // skip — already set
+    const nodeEl = document.querySelector('[data-node-id="' + node.id + '"]');
+    if (nodeEl) {
+      const domEl = findDomInputForWidget(nodeEl, w.name);
+      if (domEl) {
+        await typeIntoDomInput(domEl, text);
+        const finalVal = (typeof w.value === 'number') ? Number(text) : text;
+        if (w.value !== finalVal) {
+          w.value = finalVal;
+          try { w.callback?.(finalVal); } catch (e) {}
+        }
+        return;
+      }
+    }
+    // Canvas-painted widget fallback: blinking cursor in the value
+    // field as we update widget.value character by character.
+    const wy = (w.last_y !== undefined) ? w.last_y + 10 : (30 + wi * 20);
+    const ns = c2s(node.pos[0] + node.size[0] / 2, node.pos[1] + wy);
+    await moveTo(ns.x, ns.y, 300); ripple(); await slp(200);
+    w.value = ''; const s = String(text);
+    let curVis = true;
+    const curBlink = setInterval(() => {
+      curVis = !curVis;
+      const base = String(w.value).endsWith('|') ? String(w.value).slice(0, -1) : w.value;
+      w.value = curVis ? base + '|' : base;
+      app.canvas.setDirty(true, true);
+    }, 400);
+    for (let i = 0; i < s.length; i++) {
+      if (window.__replayStop) { clearInterval(curBlink); w.value = s; return; }
+      w.value = s.slice(0, i + 1) + '|';
+      curVis = true;
+      app.canvas.setDirty(true, true);
+      await slp(25 + Math.random() * 40);
+    }
+    clearInterval(curBlink); w.value = s; app.canvas.setDirty(true, true);
+    try { w.callback?.(w.value); } catch (e) {}
+    app.canvas.setDirty(true, true);
+  }
+
+  // Drive a Vue-rendered combo widget by clicking its real DOM
+  // PrimeVue Select. Cursor visits the combo, dropdown opens,
+  // cursor moves to the target option, click commits. If the
+  // node isn't Vue-rendered (no DOM presence) or the option
+  // can't be found, falls back to a silent value set.
+  async function selectComboViaUI(node, wi, value) {
+    const w = (node.widgets || [])[wi];
+    if (!w) return;
+    const target = String(value);
+
+    const ensureValueSet = () => {
+      if (w.value !== value) {
+        w.value = value;
+        try { w.callback?.(value); } catch (e) {}
+        app.canvas.setDirty(true, true);
+      }
+    };
+
+    if (!USE_COMBO_UI) { ensureValueSet(); return; }
+
+    try {
+      const nodeEl = document.querySelector('[data-node-id="' + node.id + '"]');
+      if (!nodeEl) { ensureValueSet(); return; }
+      const comboEl = nodeEl.querySelector('[role="combobox"][aria-label="' + w.name + '"]');
+      if (!comboEl) { ensureValueSet(); return; }
+
+      // Skip animation if already at target
+      if (comboEl.textContent.trim() === target) { ensureValueSet(); return; }
+
+      // Move cursor to combo, ripple
+      const r = comboEl.getBoundingClientRect();
+      await moveTo(r.left + r.width / 2, r.top + r.height / 2, 250);
+      ripple();
+      await slp(50);
+
+      // Synthetic click to open dropdown
+      const opts = (x, y, down) => ({
+        clientX: x, clientY: y, bubbles: true, cancelable: true,
+        button: 0, buttons: down ? 1 : 0, view: window,
+      });
+      const cx0 = r.left + r.width / 2, cy0 = r.top + r.height / 2;
+      comboEl.dispatchEvent(new PointerEvent('pointerdown', { ...opts(cx0, cy0, true), pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+      comboEl.dispatchEvent(new MouseEvent('mousedown', opts(cx0, cy0, true)));
+      comboEl.dispatchEvent(new PointerEvent('pointerup',   { ...opts(cx0, cy0, false), pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+      comboEl.dispatchEvent(new MouseEvent('mouseup',   opts(cx0, cy0, false)));
+      comboEl.dispatchEvent(new MouseEvent('click',     opts(cx0, cy0, false)));
+      await slp(280);
+
+      const overlay = document.querySelector('.p-select-overlay');
+      if (!overlay) { ensureValueSet(); return; }
+
+      const option = [...overlay.querySelectorAll('[role="option"]')].find(o =>
+        o.getAttribute('aria-label') === target
+      );
+      if (!option) {
+        document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        ensureValueSet();
+        return;
+      }
+
+      // Scroll option into view if dropdown is scrolled
+      try { option.scrollIntoView({ block: 'nearest', behavior: 'instant' }); } catch (e) {}
+      await slp(40);
+
+      const or = option.getBoundingClientRect();
+      await moveTo(or.left + or.width / 2, or.top + or.height / 2, 300);
+      ripple();
+      await slp(40);
+
+      const cx1 = or.left + or.width / 2, cy1 = or.top + or.height / 2;
+      option.dispatchEvent(new PointerEvent('pointerdown', { ...opts(cx1, cy1, true), pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+      option.dispatchEvent(new MouseEvent('mousedown', opts(cx1, cy1, true)));
+      option.dispatchEvent(new PointerEvent('pointerup',   { ...opts(cx1, cy1, false), pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+      option.dispatchEvent(new MouseEvent('mouseup',   opts(cx1, cy1, false)));
+      option.dispatchEvent(new MouseEvent('click',     opts(cx1, cy1, false)));
+      await slp(200);
+    } catch (e) {
+      console.warn('selectComboViaUI:', e.message);
+    }
+
+    // Safety net — guarantees widget value is at target even if
+    // the click chain didn't propagate for some reason.
+    ensureValueSet();
+  }
+
+  // The "control_after_generate" combo on seed widgets is rendered
+  // differently from regular combos — it's a Reka UI popover with
+  // four radio buttons (fixed / increment / decrement / randomize),
+  // triggered by the dice/shuffle icon next to the seed input.
+  // The trigger button has aria-haspopup="dialog" (not "listbox").
+  // This helper drives it: cursor → trigger click → popover opens →
+  // cursor → radio click → Escape to close.
+  async function selectControlAfterGenerate(node, wi, value) {
+    const w = (node.widgets || [])[wi];
+    if (!w) return;
+    const target = String(value);
+
+    const ensureValueSet = () => {
+      if (w.value !== value) {
+        w.value = value;
+        try { w.callback?.(value); } catch (e) {}
+        app.canvas.setDirty(true, true);
+      }
+    };
+
+    if (!USE_COMBO_UI || String(w.value) === target) { ensureValueSet(); return; }
+
+    try {
+      const nodeEl = document.querySelector('[data-node-id="' + node.id + '"]');
+      if (!nodeEl) { ensureValueSet(); return; }
+      // The popover trigger is unique on the node (only one per seed)
+      const trigger = nodeEl.querySelector('button[aria-haspopup="dialog"]');
+      if (!trigger) { ensureValueSet(); return; }
+
+      const opts = (x, y, down) => ({
+        clientX: x, clientY: y, bubbles: true, cancelable: true,
+        button: 0, buttons: down ? 1 : 0, view: window,
+      });
+      const click = (el, x, y) => {
+        el.dispatchEvent(new PointerEvent('pointerdown', { ...opts(x, y, true), pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+        el.dispatchEvent(new MouseEvent('mousedown', opts(x, y, true)));
+        el.dispatchEvent(new PointerEvent('pointerup',   { ...opts(x, y, false), pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+        el.dispatchEvent(new MouseEvent('mouseup',   opts(x, y, false)));
+        el.dispatchEvent(new MouseEvent('click',     opts(x, y, false)));
+      };
+
+      // Open the popover
+      const r = trigger.getBoundingClientRect();
+      await moveTo(r.left + r.width / 2, r.top + r.height / 2, 250);
+      ripple();
+      await slp(80);
+      click(trigger, r.left + r.width / 2, r.top + r.height / 2);
+      await slp(280);
+
+      // Find the radio by id matching the target value (fixed /
+      // increment / decrement / randomize)
+      const radio = document.querySelector('input[type="radio"][id="' + target + '"]');
+      if (!radio) {
+        document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        ensureValueSet();
+        return;
+      }
+      // Click the wrapping <label> when possible — broader target
+      const clickTarget = radio.closest('label') || radio;
+      const tr = clickTarget.getBoundingClientRect();
+      await moveTo(tr.left + tr.width / 2, tr.top + tr.height / 2, 280);
+      ripple();
+      await slp(80);
+      click(clickTarget, tr.left + tr.width / 2, tr.top + tr.height / 2);
+      await slp(200);
+
+      // Close the popover by re-clicking the trigger. Reka popovers
+      // toggle on trigger click. Cursor visibly returns to the dice
+      // icon and clicks it — same gesture a user would make. (Note:
+      // the trigger's aria-label updates to reflect the new mode,
+      // e.g., "Fixed Value", but selecting by aria-haspopup="dialog"
+      // still finds it.)
+      const trigger2 = nodeEl.querySelector('button[aria-haspopup="dialog"]');
+      if (trigger2 && document.querySelector('[data-reka-popper-content-wrapper]')) {
+        const tr2 = trigger2.getBoundingClientRect();
+        const x2 = tr2.left + tr2.width / 2, y2 = tr2.top + tr2.height / 2;
+        await moveTo(x2, y2, 250);
+        ripple();
+        await slp(80);
+        click(trigger2, x2, y2);
+        await slp(200);
+      }
+      // Defensive fallback: if for some reason the popover is still
+      // in the DOM, force-remove it so the viewer doesn't see a
+      // stuck UI element blocking the next node's animation.
+      if (document.querySelector('[data-reka-popper-content-wrapper]')) {
+        document.querySelectorAll('[data-reka-popper-content-wrapper]').forEach(el => el.remove());
+      }
+    } catch (e) {
+      console.warn('selectControlAfterGenerate:', e.message);
+    }
+
+    ensureValueSet();
+  }
+
+  // For non-text, non-combo widgets (numbers, booleans, etc.).
+  // On Vue-rendered nodes, types the value into the DOM input so
+  // the viewer sees a real interaction (the seed widget gets this
+  // treatment). On canvas-painted widgets, falls back to a hover +
+  // ripple + silent value set. Skips entirely if already at target.
+  async function clickWidget(node, wi, v) {
+    if (!node.widgets || !node.widgets[wi]) return;
+    const w = node.widgets[wi];
+    if (String(w.value) === String(v)) return;
+    const nodeEl = document.querySelector('[data-node-id="' + node.id + '"]');
+    if (nodeEl) {
+      const domEl = findDomInputForWidget(nodeEl, w.name);
+      if (domEl) {
+        await typeIntoDomInput(domEl, v);
+        const finalVal = (typeof w.value === 'number') ? Number(v) : v;
+        if (w.value !== finalVal) {
+          w.value = finalVal;
+          try { w.callback?.(finalVal); } catch (e) {}
+        }
+        return;
+      }
+    }
+    // Canvas-painted fallback
+    const wy = (w.last_y !== undefined) ? w.last_y + 10 : (30 + wi * 20);
+    const ns = c2s(node.pos[0] + node.size[0] / 2, node.pos[1] + wy);
+    await moveTo(ns.x, ns.y, 300);
     ripple();
     await slp(150);
-    w.value=v;try{w.callback?.(v);}catch(e){}app.canvas.setDirty(true,true);
+    w.value = v;
+    try { w.callback?.(v); } catch (e) {}
+    app.canvas.setDirty(true, true);
   }
 
   async function dragNodeTo(node, tx, ty, dur) {
@@ -1462,9 +1756,22 @@
       if(nd.widgets_values&&created.widgets){
         for(let i=0;i<Math.min(created.widgets.length,nd.widgets_values.length);i++){
           const v=nd.widgets_values[i];if(v==null)continue;
-          // All widgets get a visual interaction now! Text widgets type, combos click arrow, numbers click center.
+          // Text widgets get char-by-char typing animation.
+          // Combo widgets get the real DOM dropdown animation
+          // (cursor → click → option click) when the node is
+          // Vue-rendered. Other widgets fall through to a quick
+          // hover-and-set visit.
           if(typeof v==='string'&&isTextWidget(created.widgets[i])){await typeInWidget(created,i,v);}
-          else if(created.widgets[i].type==='combo'){await clickWidgetArrow(created,i,v);}
+          else if(created.widgets[i].type==='combo'){
+            // control_after_generate is a Reka popover with radio
+            // buttons, not a regular PrimeVue Select. Route it to
+            // a dedicated handler.
+            if(created.widgets[i].name==='control_after_generate'){
+              await selectControlAfterGenerate(created,i,v);
+            } else {
+              await selectComboViaUI(created,i,v);
+            }
+          }
           else{await clickWidget(created,i,v);}
         }
       }
@@ -2682,6 +2989,12 @@
     const nodeResizeToggle = document.getElementById('node-resize-toggle');
     nodeResizeToggle.addEventListener('change', e => {
       useNodeResize = e.target.checked;
+      regenerateScripts();
+    });
+
+    const comboUIToggle = document.getElementById('combo-ui-toggle');
+    comboUIToggle.addEventListener('change', e => {
+      useComboUI = e.target.checked;
       regenerateScripts();
     });
 
