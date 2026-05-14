@@ -275,6 +275,19 @@ const script = `// ════════════════════�
     app.canvas.setDirty(true, true);
   }
 
+  async function clickWidget(node, wi, v) {
+    if (!node.widgets || !node.widgets[wi]) return;
+    const w = node.widgets[wi];
+    const wy = (w.last_y !== undefined) ? w.last_y + 10 : (30 + wi * 20);
+    const ns = c2s(node.pos[0] + node.size[0] / 2, node.pos[1] + wy);
+    await moveTo(ns.x, ns.y, 300);
+    ripple();
+    await slp(150);
+    w.value = v;
+    try { w.callback?.(v); } catch(e) {}
+    app.canvas.setDirty(true, true);
+  }
+
   // ── Drag Trail ────────────────────────────────────────────────
   async function dragTo(fx,fy,tx,ty,dur){
     dur=dur||700;
@@ -621,8 +634,7 @@ const script = `// ════════════════════�
           } else if (created.widgets[i].type === 'combo') {
             await clickWidgetArrow(created, i, v);
           } else {
-            created.widgets[i].value = v;
-            try { created.widgets[i].callback?.(v); } catch(e) {}
+            await clickWidget(created, i, v);
           }
         }
       }

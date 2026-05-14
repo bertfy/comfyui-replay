@@ -761,17 +761,6 @@
       <div class="options-body">
     <div class="option-row">
       <div class="option-meta">
-        <div class="option-label">Use Node Panel</div>
-        <div class="option-desc">Create nodes via sidebar search &amp; drag instead of right-click menus</div>
-      </div>
-      <label class="switch">
-        <input type="checkbox" id="node-panel-toggle">
-        <span class="slider"></span>
-      </label>
-    </div>
-
-    <div class="option-row">
-      <div class="option-meta">
         <div class="option-label">Show Node Labels</div>
         <div class="option-desc">Show the node title as a small on-screen caption as it's created</div>
       </div>
@@ -895,7 +884,6 @@
     let exportXml = false;
     let recordVideo = false;
     let showDebugLog = false;
-    let useNodePanel = false;
     let showCaptions = false;
     let showVOCaptions = false;
     let cursorStyle = 'macos';
@@ -999,9 +987,20 @@
   const EXPORT_XML = ${exportXml};
   const RECORD_VIDEO = ${recordVideo};
   const SHOW_DEBUG_LOG = ${showDebugLog};
-  const USE_NODE_PANEL = ${useNodePanel};
   const CURSOR_STYLE = '${cursorStyle}';
   const CURSOR_SIZE = ${cursorSize};
+  // Cursor tip offsets — the SVG tip sits at these viewBox coords.
+  // Scaled to CURSOR_SIZE and applied as the cursor div's transform
+  // so the visible tip lands on (cx, cy) and not the div's corner.
+  // Otherwise trails / links / ripples appear offset from the tip.
+  const __CURSOR_TIPS = {
+    default: { vb: 24, x: 5,   y: 3   },
+    macos:   { vb: 28, x: 8.2, y: 2.8 },
+  };
+  const __TIP = __CURSOR_TIPS[CURSOR_STYLE] || __CURSOR_TIPS.default;
+  const TIP_X = (__TIP.x / __TIP.vb) * CURSOR_SIZE;
+  const TIP_Y = (__TIP.y / __TIP.vb) * CURSOR_SIZE;
+  const __TIP_T = 'translate(' + (-TIP_X) + 'px,' + (-TIP_Y) + 'px)';
   const SHOW_CAPTIONS = ${showCaptions};
   const SHOW_VO_CAPTIONS = ${showVOCaptions};
   window.__replayStop = false;
@@ -1012,7 +1011,7 @@
 
   const sty=document.createElement('style');sty.id='__rs';
   sty.textContent='@keyframes __rr{0%{transform:translate(-50%,-50%) scale(0);opacity:.6}100%{transform:translate(-50%,-50%) scale(1);opacity:0}}'
-    +'@keyframes __rck{0%{transform:translate(-2px,-2px) scale(1)}50%{transform:translate(-2px,-2px) scale(.75)}100%{transform:translate(-2px,-2px) scale(1)}}'
+    +'@keyframes __rck{0%{transform:'+__TIP_T+' scale(1)}50%{transform:'+__TIP_T+' scale(.75)}100%{transform:'+__TIP_T+' scale(1)}}'
     +'@keyframes __rlb{0%{opacity:0;transform:translateY(6px)}15%{opacity:1;transform:translateY(0)}85%{opacity:1}100%{opacity:0}}'
     +'#__rc.ck{animation:__rck .15s ease-in-out}';
   document.head.appendChild(sty);
@@ -1023,7 +1022,7 @@
   };
   const cur=document.createElement('div');cur.id='__rc';
   cur.innerHTML=CURSOR_SVGS[CURSOR_STYLE]||CURSOR_SVGS.default;
-  Object.assign(cur.style,{position:'fixed',top:'0',left:'0',width:CURSOR_SIZE+'px',height:CURSOR_SIZE+'px',zIndex:'999999',pointerEvents:'none',filter:'drop-shadow(1px 2px 3px rgba(0,0,0,.4))',transform:'translate(-2px,-2px)'});
+  Object.assign(cur.style,{position:'fixed',top:'0',left:'0',width:CURSOR_SIZE+'px',height:CURSOR_SIZE+'px',zIndex:'999999',pointerEvents:'none',filter:'drop-shadow(1px 2px 3px rgba(0,0,0,.4))',transform:__TIP_T});
   document.body.appendChild(cur);
 
   const ov=document.createElement('div');ov.id='__ro';
@@ -1147,7 +1146,18 @@
     await moveTo(ns.x,ns.y,300);
     ripple();
     await slp(100);
-    if(Math.random()>0.5){ripple();await slp(100);} // simulate a couple clicks sometimes
+    if(Math.random()>0.5){ripple();await slp(100);}
+    w.value=v;try{w.callback?.(v);}catch(e){}app.canvas.setDirty(true,true);
+  }
+
+  async function clickWidget(node,wi,v){
+    if(!node.widgets||!node.widgets[wi])return;
+    const w=node.widgets[wi];
+    const wy=(w.last_y!==undefined)?w.last_y+10:(30+wi*20);
+    const ns=c2s(node.pos[0]+node.size[0]/2,node.pos[1]+wy);
+    await moveTo(ns.x,ns.y,300);
+    ripple();
+    await slp(150);
     w.value=v;try{w.callback?.(v);}catch(e){}app.canvas.setDirty(true,true);
   }
 
@@ -1190,128 +1200,80 @@
       ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(cx,cy);ctx.strokeStyle='rgba(0,212,255,.3)';ctx.lineWidth=2;ctx.stroke();px=cx;py=cy;await frm();}
     ripple();let op=1;const fi=setInterval(()=>{op-=.05;trail.style.opacity=op;if(op<=0){clearInterval(fi);trail.remove();}},30);}
 
-  function dismissMenus(){document.querySelectorAll('.litecontextmenu,.comfy-context-menu').forEach(m=>m.remove());}
-  function findEntry(text){
-    const menus=document.querySelectorAll('.litecontextmenu,.comfy-context-menu,.litegraph-context-menu');
-    if(menus.length===0)return null;
-    const last=menus[menus.length-1];
-    const entries=last.querySelectorAll('.litemenu-entry,.menu-entry');
-    for(const e of entries){const lb=e.querySelector('.litemenu-entry-content')?.textContent?.trim()||e.childNodes[0]?.textContent?.trim()||e.textContent?.trim();if(lb===text)return e;}
-    for(const e of entries){const lb=e.querySelector('.litemenu-entry-content')?.textContent?.trim()||e.childNodes[0]?.textContent?.trim()||e.textContent?.trim();if(lb&&lb.includes(text))return e;}
-    for(let mi=menus.length-2;mi>=0;mi--){const e2=menus[mi].querySelectorAll('.litemenu-entry,.menu-entry');for(const e of e2){const lb=e.querySelector('.litemenu-entry-content')?.textContent?.trim()||e.childNodes[0]?.textContent?.trim()||e.textContent?.trim();if(lb===text)return e;}}
-    return null;}
-
-  async function hoverEntry(e){const r=e.getBoundingClientRect();await moveTo(r.left+r.width/2,r.top+r.height/2,200);
-    e.dispatchEvent(new MouseEvent('mouseenter',{bubbles:true,clientX:cx,clientY:cy}));
-    e.dispatchEvent(new MouseEvent('mouseover',{bubbles:true,clientX:cx,clientY:cy}));
-    e.dispatchEvent(new PointerEvent('pointerenter',{bubbles:true,clientX:cx,clientY:cy}));
-    e.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,clientX:cx,clientY:cy}));}
-
-  async function clickEntry(e){ripple();e.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,clientX:cx,clientY:cy}));
-    await slp(30);e.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,clientX:cx,clientY:cy}));
-    e.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:cx,clientY:cy}));}
-
-  async function addViaMenu(nd,sx,sy){
-    const canvasEl=document.querySelector('canvas.graph-canvas-container')||document.querySelector('canvas#graph-canvas')||document.querySelector('canvas');
-    if(!canvasEl)return false;
+  // ── Add via native Search Dialog (hybrid) ─────────────────
+  // Visually opens the ComfyUI search dialog, types the node
+  // name into the real input so the real result list renders,
+  // moves the cursor to the first result, then closes the
+  // dialog WITHOUT clicking a row (clicking enters a Vue
+  // placement-mode that cannot be committed by synthetic events
+  // — see experiments/placement-commit-probe.js). The actual
+  // node is created via LiteGraph.createNode + app.graph.add
+  // at the exact target canvas position. Returns the created
+  // node, or null on failure.
+  async function addViaSearchDialog(nd, sx, sy) {
     ripple('rgba(255,165,0,.6)');
-    const rect=canvasEl.getBoundingClientRect();
-    function mkEvt(type){const e=new MouseEvent(type,{bubbles:true,cancelable:true,clientX:sx,clientY:sy,screenX:sx,screenY:sy,button:2,buttons:2});e.canvasX=sx-rect.left;e.canvasY=sy-rect.top;e.isPrimary=true;return e;}
-    let menuOpened=false;
-    try{if(app.canvas.processMouseDown){app.canvas.processMouseDown(mkEvt('mousedown'));await slp(80);if(app.canvas.processMouseUp)app.canvas.processMouseUp(mkEvt('mouseup'));await slp(400);menuOpened=!!document.querySelector('.litecontextmenu,.comfy-context-menu,.litegraph-context-menu');}}catch(e){}
-    if(!menuOpened){try{if(app.canvas.getCanvasMenuOptions&&LiteGraph.ContextMenu){const options=app.canvas.getCanvasMenuOptions();new LiteGraph.ContextMenu(options,{event:mkEvt('contextmenu'),callback:null,parentMenu:null,allow_html:false,node:null});await slp(400);menuOpened=!!document.querySelector('.litecontextmenu,.litegraph-context-menu');}}catch(e){}}
-    if(!menuOpened){try{const evOpts={bubbles:true,cancelable:true,clientX:sx,clientY:sy,button:2,buttons:2};canvasEl.dispatchEvent(new PointerEvent('pointerdown',evOpts));canvasEl.dispatchEvent(new MouseEvent('mousedown',evOpts));await slp(80);canvasEl.dispatchEvent(new PointerEvent('pointerup',evOpts));canvasEl.dispatchEvent(new MouseEvent('mouseup',evOpts));canvasEl.dispatchEvent(new MouseEvent('contextmenu',evOpts));await slp(400);menuOpened=!!document.querySelector('.litecontextmenu,.comfy-context-menu,.litegraph-context-menu');}catch(e){}}
-    if(menuOpened){const menu=document.querySelector('.litecontextmenu,.comfy-context-menu,.litegraph-context-menu');if(menu){menu.style.left=sx+'px';menu.style.top=sy+'px';}}
-    if(!menuOpened){dismissMenus();return false;}
-    function menuCount(){return document.querySelectorAll('.litecontextmenu,.comfy-context-menu,.litegraph-context-menu').length;}
-    async function waitSub(prev,timeout){timeout=timeout||800;const s=Date.now();while(Date.now()-s<timeout){if(menuCount()>prev)return true;await slp(50);}return false;}
-    let mc=menuCount();
-    const an=findEntry('Add Node')||findEntry('Add node');if(an){await hoverEntry(an);await slp(200);await clickEntry(an);await waitSub(mc);await slp(200);}
-    const cat=LiteGraph.registered_node_types[nd.type]?.category;
-    if(cat){const parts=cat.split('/');for(let pi=0;pi<parts.length;pi++){mc=menuCount();await slp(200);const ce=findEntry(parts[pi]);if(ce){await hoverEntry(ce);await slp(200);await clickEntry(ce);await waitSub(mc);await slp(200);}else{console.warn('Menu entry not found: '+parts[pi]);}}}
-    await slp(200);const reg=LiteGraph.registered_node_types[nd.type];
-    let ne=findEntry(nd.type)||findEntry(nd.title);
-    if(!ne&&reg&&reg.title)ne=findEntry(reg.title);
-    if(!ne&&reg&&reg.name)ne=findEntry(reg.name);
-    if(!ne&&nd.type.includes('/'))ne=findEntry(nd.type.split('/').pop());
-    if(ne){await hoverEntry(ne);await slp(200);await clickEntry(ne);await slp(300);dismissMenus();return true;}
-    dismissMenus();return false;}
-
-  // ── Add via Node Panel (sidebar search + drag) ─────────────
-  async function addViaPanel(nd, targetScreenX, targetScreenY) {
-    // 1. Open the Nodes sidebar tab
-    const nodesTab = [...document.querySelectorAll('nav button, aside button, [role="tab"], .sidebar-tab, .comfyui-sidebar button')]
-      .find(b => /^nodes$/i.test(b.textContent?.trim()) || b.getAttribute('aria-label')?.toLowerCase() === 'nodes');
-    if (nodesTab) {
-      const nr = nodesTab.getBoundingClientRect();
-      await moveTo(nr.left + nr.width/2, nr.top + nr.height/2, 300);
-      ripple(); nodesTab.click(); await slp(400);
-    }
-
-    // 2. Find the search input in the sidebar panel
-    const searchInput = document.querySelector('.comfyui-sidebar input[type="text"], .comfyui-sidebar input[placeholder*="Search"], aside input[type="text"], .node-search input, .sidebar-content input');
-    if (!searchInput) { console.warn('Node panel search input not found'); return false; }
-    const sr = searchInput.getBoundingClientRect();
-    await moveTo(sr.left + sr.width/2, sr.top + sr.height/2, 300);
-    ripple(); searchInput.focus(); searchInput.click(); await slp(200);
-
-    // 3. Type the node name into search
-    const searchTerm = nd.title !== nd.type ? nd.title : (nd.type.includes('/') ? nd.type.split('/').pop() : nd.type);
-    searchInput.value = '';
-    searchInput.dispatchEvent(new Event('input', {bubbles: true}));
-    await slp(100);
-    for (let i = 0; i < searchTerm.length; i++) {
-      if (window.__replayStop) return false;
-      searchInput.value = searchTerm.slice(0, i + 1);
-      searchInput.dispatchEvent(new Event('input', {bubbles: true}));
-      await slp(30 + Math.random() * 30);
-    }
-    await slp(400);
-
-    // 4. Find the matching result item
-    const results = document.querySelectorAll('.comfyui-sidebar .node-item, .comfyui-sidebar [draggable], aside .comfy-node-item, .sidebar-content .tree-leaf, .comfyui-sidebar li');
-    let match = null;
-    for (const r of results) {
-      const label = r.textContent?.trim();
-      if (label && (label === nd.type || label === searchTerm || label.includes(searchTerm))) { match = r; break; }
-    }
-    if (!match) { console.warn('Node panel: no match for ' + searchTerm); return false; }
-
-    // 5. Drag the result to the canvas target position
-    const mr = match.getBoundingClientRect();
-    const startX = mr.left + mr.width/2, startY = mr.top + mr.height/2;
-    await moveTo(startX, startY, 300); ripple(); await slp(150);
-
-    const dragOpts = {bubbles: true, cancelable: true, clientX: startX, clientY: startY};
-    match.dispatchEvent(new DragEvent('dragstart', {...dragOpts, dataTransfer: new DataTransfer()}));
-    match.dispatchEvent(new PointerEvent('pointerdown', dragOpts));
-    match.dispatchEvent(new MouseEvent('mousedown', dragOpts));
     await slp(100);
 
-    const canvasEl2 = document.querySelector('canvas.graph-canvas-container') || document.querySelector('canvas#graph-canvas') || document.querySelector('canvas');
-    if (!canvasEl2) return false;
-    const panelSteps = 25;
-    for (let i = 0; i <= panelSteps; i++) {
-      if (window.__replayStop) return false;
-      const t = i / panelSteps, ease = t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3)/2;
-      const mx = startX + (targetScreenX - startX) * ease;
-      const my = startY + (targetScreenY - startY) * ease;
-      cx = mx; cy = my; cur.style.left = cx + 'px'; cur.style.top = cy + 'px';
-      canvasEl2.dispatchEvent(new DragEvent('dragover', {bubbles: true, cancelable: true, clientX: mx, clientY: my}));
-      await frm();
+    let dialogOpened = false;
+    try {
+      await app.extensionManager?.command?.execute('Workspace.SearchBox.Toggle');
+      await slp(300);
+      dialogOpened = !!document.querySelector('.p-dialog-mask');
+    } catch (e) { console.warn('Search dialog command failed:', e.message); }
+
+    if (dialogOpened && !window.__replayStop) {
+      const inp = document.querySelector('input[aria-controls="results-list"]')
+                || document.querySelector('input[role="combobox"][placeholder="Add a node..."]');
+      if (inp) {
+        const ir = inp.getBoundingClientRect();
+        await moveTo(ir.left + ir.width / 2, ir.top + ir.height / 2, 300);
+        ripple();
+        inp.focus(); inp.value = '';
+        inp.dispatchEvent(new Event('input', { bubbles: true }));
+        await slp(50);
+        const reg = LiteGraph.registered_node_types[nd.type];
+        const query = reg?.title || (nd.title && nd.title !== nd.type ? nd.title : nd.type);
+        for (let i = 0; i < query.length; i++) {
+          if (window.__replayStop) break;
+          inp.value = query.slice(0, i + 1);
+          inp.dispatchEvent(new InputEvent('input', { bubbles: true, data: query[i], inputType: 'insertText' }));
+          await slp(25 + Math.random() * 30);
+        }
+        await slp(400);
+        const firstRow = document.querySelector('[data-testid="result-item"]');
+        if (firstRow && !window.__replayStop) {
+          const rr = firstRow.getBoundingClientRect();
+          await moveTo(rr.left + rr.width / 2, rr.top + rr.height / 2, 300);
+          ripple();
+          await slp(200);
+        }
+      }
+
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      document.body.dispatchEvent(new KeyboardEvent('keyup',   { key: 'Escape', bubbles: true, cancelable: true }));
+      await slp(200);
+      if (document.querySelector('.p-dialog-mask')) {
+        try { await app.extensionManager?.command?.execute('Workspace.SearchBox.Toggle'); } catch (e) {}
+        await slp(200);
+      }
     }
 
-    const dt = new DataTransfer();
-    dt.setData('text/plain', nd.type);
-    canvasEl2.dispatchEvent(new DragEvent('drop', {bubbles: true, cancelable: true, clientX: targetScreenX, clientY: targetScreenY, dataTransfer: dt}));
-    canvasEl2.dispatchEvent(new DragEvent('dragend', {bubbles: true, cancelable: true, clientX: targetScreenX, clientY: targetScreenY}));
-    match.dispatchEvent(new PointerEvent('pointerup', {bubbles: true, clientX: targetScreenX, clientY: targetScreenY}));
-    match.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, clientX: targetScreenX, clientY: targetScreenY}));
-    ripple('rgba(0,255,136,.6)');
-    await slp(300);
+    if (!window.__replayStop) {
+      await moveTo(sx, sy, 400);
+      ripple('rgba(0,255,136,.6)');
+    }
 
-    searchInput.value = ''; searchInput.dispatchEvent(new Event('input', {bubbles: true}));
-    return true;
+    const created = LiteGraph.createNode(nd.type);
+    if (!created) { console.warn('Could not create node:', nd.type); return null; }
+    created.pos = [nd.pos[0], nd.pos[1]];
+    app.graph.add(created);
+    // Clear any stale output preview that the Vue frontend auto-loads
+    // for output nodes (SaveImage, PreviewImage) based on filename_prefix.
+    if (created.imgs) created.imgs = [];
+    if (created.images) created.images = [];
+    app.canvas.setDirty(true, true);
+    await slp(150);
+    return created;
   }
 
   function isTextWidget(w){if(!w)return false;const t=(w.type||'').toLowerCase();
@@ -1333,23 +1295,20 @@
     const ncx=nd.pos[0]+nd.size[0]/2,ncy=nd.pos[1]+nd.size[1]/2;
     if(USE_CAMERA_PAN) await panTo(ncx,ncy,500);
     const sp=c2s(ncx,ncy);await moveTo(sp.x,sp.y,500);await slp(200);
-    const before=app.graph._nodes.length;
-    if(USE_NODE_PANEL){await addViaPanel(nd,sp.x,sp.y);}else{await addViaMenu(nd,sp.x,sp.y);}
-    await slp(200);
-    let created=app.graph._nodes.length>before?app.graph._nodes[app.graph._nodes.length-1]:null;
-    if(!created){log(step,total,'   ⚙️ API fallback: '+nd.type);ripple();created=LiteGraph.createNode(nd.type);if(created)app.graph.add(created);}
+    const created = await addViaSearchDialog(nd, sp.x, sp.y);
+    if(!created) log(step,total,'   ⚠️ Could not create: '+nd.type);
     if(created){
       created.size=[nd.size[0],nd.size[1]];
-      await dragNodeTo(created, nd.pos[0], nd.pos[1], 500);
       created.pos=[nd.pos[0],nd.pos[1]];
       if(nd.title!==nd.type)created.title=nd.title;
       app.canvas.setDirty(true,true);await slp(50);
       if(nd.widgets_values&&created.widgets){
         for(let i=0;i<Math.min(created.widgets.length,nd.widgets_values.length);i++){
           const v=nd.widgets_values[i];if(v==null)continue;
+          // All widgets get a visual interaction now! Text widgets type, combos click arrow, numbers click center.
           if(typeof v==='string'&&isTextWidget(created.widgets[i])){await typeInWidget(created,i,v);}
           else if(created.widgets[i].type==='combo'){await clickWidgetArrow(created,i,v);}
-          else{created.widgets[i].value=v;try{created.widgets[i].callback?.(v);}catch(e){}}
+          else{await clickWidget(created,i,v);}
         }
       }
       if(nd.properties)Object.assign(created.properties,nd.properties);
@@ -1388,7 +1347,13 @@
       if(USE_CAMERA_PAN) await panTo(midX,midY,400);
       const sp2=new Float32Array(2),tp2=new Float32Array(2);
       sn.getConnectionPos(false,lk.srcSlot,sp2);tn.getConnectionPos(true,lk.tgtSlot,tp2);
-      const ss=c2s(sp2[0],sp2[1]),ts=c2s(tp2[0],tp2[1]);
+      // ComfyCloud's Vue frontend renders the slot circle below where
+      // getConnectionPos reports. Empirically the visual circle sits
+      // ~NODE_SLOT_HEIGHT/2 lower in canvas coords, so the wire emerges
+      // there. Bias our trail endpoints by that amount so the trail
+      // lines up with the wire instead of floating above it.
+      const SLOT_Y_FIX = (typeof LiteGraph !== 'undefined' ? LiteGraph.NODE_SLOT_HEIGHT : 20) / 2;
+      const ss=c2s(sp2[0],sp2[1]+SLOT_Y_FIX),ts=c2s(tp2[0],tp2[1]+SLOT_Y_FIX);
       await dragTo(ss.x,ss.y,ts.x,ts.y,600);await slp(50);
       sn.connect(lk.srcSlot,tn,lk.tgtSlot);app.canvas.setDirty(true,true);await slp(DLY*0.3);
     }
@@ -1413,11 +1378,7 @@
       const bR=runBtn.getBoundingClientRect();const bX=bR.left+bR.width/2,bY=bR.top+bR.height/2;
       await moveTo(bX,bY,500);await slp(300);
       ripple('rgba(0,255,136,.6)');
-      const evO={bubbles:true,cancelable:true,clientX:bX,clientY:bY,button:0};
-      runBtn.dispatchEvent(new PointerEvent('pointerdown',evO));runBtn.dispatchEvent(new MouseEvent('mousedown',evO));
-      await slp(80);
-      runBtn.dispatchEvent(new PointerEvent('pointerup',evO));runBtn.dispatchEvent(new MouseEvent('mouseup',evO));
-      runBtn.dispatchEvent(new MouseEvent('click',evO));runBtn.click();
+      runBtn.click();
       console.log('%c⏳ Workflow queued! Waiting for execution...','color:#fcd34d;font-weight:bold;');
     }else{
       console.log('%c⚙️ No Run button found, queuing via API...','color:#888;');
@@ -2412,7 +2373,6 @@
     const aiTimingToggle = document.getElementById('ai-timing-toggle');
     const cameraPanToggle = document.getElementById('camera-pan-toggle');
     const mp4Toggle = document.getElementById('mp4-toggle');
-    const nodePanelToggle = document.getElementById('node-panel-toggle');
 
     function handleImage(file) {
       if (!file.type.startsWith('image/')) return;
@@ -2550,15 +2510,6 @@
       regenerateAll();
     });
 
-    nodePanelToggle.addEventListener('change', e => {
-      useNodePanel = e.target.checked;
-      for (const [name, item] of files) {
-        if (item._rawWorkflow) {
-          item.script = generateScript(item._rawWorkflow, delay, name, item.narrations, item.deletedMetaSteps);
-        }
-      }
-      renderQueue();
-    });
 
     const captionsToggle = document.getElementById('captions-toggle');
     captionsToggle.addEventListener('change', e => {

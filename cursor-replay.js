@@ -309,6 +309,19 @@ function log(step, total, msg) {
         },
 
         /**
+         * Get the screen position of a widget
+         */
+        getWidgetScreenPos(nodeId, widgetIndex) {
+          const node = app.graph.getNodeById(nodeId);
+          if (!node || !node.widgets || !node.widgets[widgetIndex]) return null;
+          const w = node.widgets[widgetIndex];
+          const wy = (w.last_y !== undefined) ? w.last_y + 10 : (30 + widgetIndex * 20);
+          const cx = node.pos[0] + (node.size ? node.size[0] / 2 : 100);
+          const cy = node.pos[1] + wy;
+          return this.canvasToScreen(cx, cy);
+        },
+
+        /**
          * Get the screen position for a target canvas position (for placing nodes).
          */
         getScreenPos(canvasX, canvasY) {
@@ -526,19 +539,6 @@ function log(step, total, msg) {
           if (sizeW && sizeH) node.size = [sizeW, sizeH];
           if (title && title !== nodeType) node.title = title;
 
-          // Set widget values
-          if (widgetValues && node.widgets) {
-            for (let i = 0; i < Math.min(node.widgets.length, widgetValues.length); i++) {
-              if (widgetValues[i] !== null && widgetValues[i] !== undefined) {
-                node.widgets[i].value = widgetValues[i];
-                // Trigger callback if exists
-                if (node.widgets[i].callback) {
-                  try { node.widgets[i].callback(widgetValues[i]); } catch(e) {}
-                }
-              }
-            }
-          }
-
           // Set properties
           if (properties) {
             Object.assign(node.properties, properties);
@@ -554,7 +554,6 @@ function log(step, total, msg) {
           sizeW: node.size ? node.size[0] : null,
           sizeH: node.size ? node.size[1] : null,
           title: node.title || null,
-          widgetValues: node.widgets_values || null,
           properties: node.properties || null,
           origId: origId,
         }
@@ -562,6 +561,76 @@ function log(step, total, msg) {
 
       if (runtimeId !== null) {
         createdNodeIds[origId] = runtimeId;
+
+        // Animate setting widget values
+        if (node.widgets_values) {
+          for (let i = 0; i < node.widgets_values.length; i++) {
+            const val = node.widgets_values[i];
+            if (val === null || val === undefined) continue;
+            
+            // Get widget info from the page to determine interaction
+            const wInfo = await page.evaluate(({nodeId, idx, v}) => {
+              const n = app.graph.getNodeById(nodeId);
+              if(!n || !n.widgets || !n.widgets[idx]) return null;
+              const w = n.widgets[idx];
+              const t = (w.type || "").toLowerCase();
+              let isText = t === "text" || t === "string" || t === "customtext" || w.options?.multiline;
+              if (typeof v === "string" && v.length > 20) isText = true;
+              return { type: t, isText };
+            }, {nodeId: runtimeId, idx: i, v: val});
+
+            if (!wInfo) continue;
+
+            const wPos = await page.evaluate(
+              ({nodeId, idx}) => window.__replayHelpers.getWidgetScreenPos(nodeId, idx),
+              {nodeId: runtimeId, idx: i}
+            );
+
+            if (wPos) {
+              await smoothMove(page, cursorX, cursorY, wPos.x, wPos.y, 300);
+              cursorX = wPos.x;
+              cursorY = wPos.y;
+              
+              if (wInfo.isText) {
+                // Click text widgets to focus
+                await page.mouse.click(cursorX, cursorY);
+                await sleep(200);
+                
+                // Try clearing existing text by Ctrl+A Delete
+                await page.keyboard.down("Control");
+                await page.keyboard.press("a");
+                await page.keyboard.up("Control");
+                await page.keyboard.press("Delete");
+                await sleep(50);
+                
+                await page.keyboard.type(String(val), {delay: 15 + Math.random() * 20});
+                await sleep(100);
+                
+                // Click slightly away to remove focus
+                await page.mouse.click(cursorX - 50, cursorY - 50);
+                cursorX -= 50;
+                cursorY -= 50;
+                await sleep(100);
+              } else {
+                // For combos/numbers: click widget, then set value manually via API 
+                // to avoid complex dropdown handling while still showing interaction
+                await page.mouse.click(cursorX, cursorY);
+                await sleep(100);
+                if (Math.random() > 0.5) await sleep(100); // slight random delay
+                
+                await page.evaluate(({nodeId, idx, v}) => {
+                  const n = app.graph.getNodeById(nodeId);
+                  if(n && n.widgets && n.widgets[idx]) {
+                    n.widgets[idx].value = v;
+                    try { n.widgets[idx].callback?.(v); } catch(e) {}
+                    app.canvas.setDirty(true, true);
+                  }
+                }, {nodeId: runtimeId, idx: i, v: val});
+              }
+              await sleep(200);
+            }
+          }
+        }
       } else {
         console.warn(`   ⚠️  Failed to create node: ${node.type}`);
       }
