@@ -676,6 +676,17 @@
 
     <div class="option-row">
       <div class="option-meta">
+        <div class="option-label">Typing Speed</div>
+        <div class="option-desc">Base milliseconds per typed character (smaller = faster, larger = slower)</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <input type="range" id="typing-delay-range" min="15" max="200" step="5" value="50" />
+        <span id="typing-delay-label" style="color:var(--muted);font-size:13px;font-family:'JetBrains Mono',monospace;width:56px;">50ms</span>
+      </div>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
         <div class="option-label">Cursor Style</div>
         <div class="option-desc">Choose the animated cursor appearance</div>
       </div>
@@ -947,6 +958,7 @@
     let showCaptions = false;
     let useNodeResize = true;
     let useComboUI = true;
+    let typingDelay = 50;
     let resizeDuration = 500;
     let resizeEasing = 'cubic';
     let resizeStart = 'default';
@@ -1082,6 +1094,7 @@
   const SHOW_CAPTIONS = ${showCaptions};
   const USE_NODE_RESIZE = ${useNodeResize};
   const USE_COMBO_UI = ${useComboUI};
+  const TYPING_DELAY = ${typingDelay};
   const RESIZE_DURATION = ${resizeDuration};
   const RESIZE_EASING = '${resizeEasing}';
   const RESIZE_START = '${resizeStart}';
@@ -1273,7 +1286,7 @@
         bubbles: true, cancelable: true,
         data: str[i], inputType: 'insertText',
       }));
-      await slp(25 + Math.random() * 30);
+      await slp(TYPING_DELAY + Math.random() * 30);
     }
     domEl.value = str;
     domEl.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
@@ -1321,7 +1334,7 @@
       w.value = s.slice(0, i + 1) + '|';
       curVis = true;
       app.canvas.setDirty(true, true);
-      await slp(25 + Math.random() * 40);
+      await slp(TYPING_DELAY + Math.random() * 30);
     }
     clearInterval(curBlink); w.value = s; app.canvas.setDirty(true, true);
     try { w.callback?.(w.value); } catch (e) {}
@@ -1667,11 +1680,21 @@
         await slp(50);
         const reg = LiteGraph.registered_node_types[nd.type];
         const query = reg?.title || (nd.title && nd.title !== nd.type ? nd.title : nd.type);
+        // Type the query, but stop early once the first result row
+        // already matches our target — saves typing out a long name
+        // when 3-4 characters are enough to filter the dropdown.
+        const targetLc = query.toLowerCase();
         for (let i = 0; i < query.length; i++) {
           if (window.__replayStop) break;
           inp.value = query.slice(0, i + 1);
           inp.dispatchEvent(new InputEvent('input', { bubbles: true, data: query[i], inputType: 'insertText' }));
-          await slp(25 + Math.random() * 30);
+          await slp(TYPING_DELAY + Math.random() * 30);
+          if (i >= 2) {
+            const firstResult = document.querySelector('[data-testid="result-item"]');
+            if (firstResult && firstResult.textContent.trim().toLowerCase().startsWith(targetLc)) {
+              break;
+            }
+          }
         }
         await slp(400);
         const firstRow = document.querySelector('[data-testid="result-item"]');
@@ -2995,6 +3018,14 @@
     const comboUIToggle = document.getElementById('combo-ui-toggle');
     comboUIToggle.addEventListener('change', e => {
       useComboUI = e.target.checked;
+      regenerateScripts();
+    });
+
+    const typingDelayRange = document.getElementById('typing-delay-range');
+    const typingDelayLabel = document.getElementById('typing-delay-label');
+    typingDelayRange.addEventListener('input', e => {
+      typingDelay = parseInt(e.target.value, 10);
+      typingDelayLabel.textContent = typingDelay + 'ms';
       regenerateScripts();
     });
 
