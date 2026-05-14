@@ -769,6 +769,55 @@
         <span class="slider"></span>
       </label>
     </div>
+
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Animate Node Resize</div>
+        <div class="option-desc">Animate each node from its default computed size to the workflow's target size after placement (experimental — may interact with widget callbacks)</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="node-resize-toggle" checked>
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Resize Duration</div>
+        <div class="option-desc">How long the resize animation runs</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <input type="range" id="resize-duration" min="100" max="1500" step="50" value="500" />
+        <span id="resize-duration-label" style="color:var(--muted);font-size:13px;font-family:'JetBrains Mono',monospace;width:56px;">500ms</span>
+      </div>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Resize Easing</div>
+        <div class="option-desc">Animation curve for the resize</div>
+      </div>
+      <select id="resize-easing">
+        <option value="cubic" selected>Smooth (ease in-out)</option>
+        <option value="linear">Linear</option>
+        <option value="easeOut">Ease Out</option>
+        <option value="easeIn">Ease In</option>
+        <option value="back">Back (overshoot)</option>
+      </select>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Resize Start Size</div>
+        <div class="option-desc">Where the resize animation begins from</div>
+      </div>
+      <select id="resize-start">
+        <option value="default" selected>Default (LiteGraph minimum)</option>
+        <option value="half">Half target size</option>
+        <option value="quarter">Quarter target size</option>
+        <option value="zero">Near-zero (grow from a point)</option>
+      </select>
+    </div>
       </div>
     </details>
 
@@ -885,6 +934,10 @@
     let recordVideo = false;
     let showDebugLog = false;
     let showCaptions = false;
+    let useNodeResize = true;
+    let resizeDuration = 500;
+    let resizeEasing = 'cubic';
+    let resizeStart = 'default';
     let showVOCaptions = false;
     let cursorStyle = 'macos';
     let cursorSize = 24;
@@ -966,9 +1019,22 @@
         properties: n.properties || null,
       }));
 
-      const linksData = connectionsInOrder.map(c => ({
-        srcId: c.srcId, srcSlot: c.srcSlot, tgtId: c.tgtId, tgtSlot: c.tgtSlot,
-      }));
+      // Slot names from the workflow JSON are critical for autogrow /
+      // widget-as-input nodes (Gemini, Grok, etc.) where the runtime
+      // node.inputs[] array contains widgets-converted-to-inputs that
+      // aren't represented in the workflow JSON. Workflow tgtSlot=0
+      // can be runtime inputs[5] in those cases. Carrying the name
+      // lets the IIFE translate at runtime via resolveSlot().
+      const nodesById = new Map(nodes.map(n => [n.id, n]));
+      const linksData = connectionsInOrder.map(c => {
+        const srcNode = nodesById.get(c.srcId);
+        const tgtNode = nodesById.get(c.tgtId);
+        return {
+          srcId: c.srcId, srcSlot: c.srcSlot, tgtId: c.tgtId, tgtSlot: c.tgtSlot,
+          srcSlotName: srcNode?.outputs?.[c.srcSlot]?.name || null,
+          tgtSlotName: tgtNode?.inputs?.[c.tgtSlot]?.name || null,
+        };
+      });
 
       return `
 // ComfyUI Animated Replay — ${filename}
@@ -1002,6 +1068,10 @@
   const TIP_Y = (__TIP.y / __TIP.vb) * CURSOR_SIZE;
   const __TIP_T = 'translate(' + (-TIP_X) + 'px,' + (-TIP_Y) + 'px)';
   const SHOW_CAPTIONS = ${showCaptions};
+  const USE_NODE_RESIZE = ${useNodeResize};
+  const RESIZE_DURATION = ${resizeDuration};
+  const RESIZE_EASING = '${resizeEasing}';
+  const RESIZE_START = '${resizeStart}';
   const SHOW_VO_CAPTIONS = ${showVOCaptions};
   window.__replayStop = false;
 
@@ -1092,6 +1162,22 @@
     const el=document.querySelector('canvas.graph-canvas-container')||document.querySelector('canvas#graph-canvas')||document.querySelector('canvas');
     if(!el)return{x:cx2,y:cy2};const r=el.getBoundingClientRect(),ds=app.canvas.ds;
     return{x:(cx2+ds.offset[0])*ds.scale+r.left,y:(cy2+ds.offset[1])*ds.scale+r.top};
+  }
+
+  // For autogrow / widget-as-input nodes, the runtime node.inputs[]
+  // contains widgets-converted-to-inputs and may not align by index
+  // with the workflow JSON inputs[]. Resolve the runtime index by
+  // matching slot name. Falls back to the workflow index when there
+  // is no name match (handles older workflows, plain nodes, etc.).
+  function resolveSlot(node, isInput, fallbackIdx, slotName) {
+    if (slotName) {
+      const list = isInput ? node.inputs : node.outputs;
+      if (list) {
+        const idx = list.findIndex(s => s && s.name === slotName);
+        if (idx >= 0) return idx;
+      }
+    }
+    return fallbackIdx;
   }
 
   async function cameraTo(cvX, cvY, targetScale, dur) {
@@ -1189,6 +1275,60 @@
     }
     node.pos[0] = tx; node.pos[1] = ty;
     ripple(); await slp(100);
+  }
+
+  // Easing functions. Each takes t in [0,1] and returns an eased
+  // value (typically also in [0,1], except 'back' which overshoots).
+  const EASINGS = {
+    linear:  t => t,
+    easeIn:  t => t*t*t,
+    easeOut: t => 1 - Math.pow(1-t, 3),
+    cubic:   t => t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3)/2,
+    back:    t => {
+      const c1 = 1.70158, c2 = c1 * 1.525;
+      return t < .5
+        ? (Math.pow(2*t, 2) * ((c2+1)*2*t - c2)) / 2
+        : (Math.pow(2*t-2, 2) * ((c2+1)*(2*t-2) + c2) + 2) / 2;
+    },
+  };
+
+  // Animate node.size from fromSize to toSize over dur ms using the
+  // named easing. Reassigns node.size each frame so any LiteGraph
+  // size-setter fires. To prevent the render loop from re-clamping
+  // node.size back to the computed minimum each frame (which was
+  // causing visible jitter), we monkey-patch node.computeSize to
+  // return the currently-animating size for the duration of the
+  // animation. Restored in finally so subsequent renders behave
+  // normally. Snaps without animating if deltas are both <4px.
+  async function animateResize(node, fromSize, toSize, dur, easingName) {
+    dur = dur || 400;
+    const easing = EASINGS[easingName] || EASINGS.cubic;
+    const dx = toSize[0] - fromSize[0], dy = toSize[1] - fromSize[1];
+    if (Math.abs(dx) < 4 && Math.abs(dy) < 4) {
+      node.size = [toSize[0], toSize[1]];
+      app.canvas.setDirty(true, true);
+      return;
+    }
+    const origComputeSize = node.computeSize;
+    node.computeSize = function () { return [this.size[0], this.size[1]]; };
+    try {
+      node.size = [fromSize[0], fromSize[1]];
+      app.canvas.setDirty(true, true);
+      await frm();
+      const steps = Math.max(20, Math.floor(dur / 16));
+      for (let i = 1; i <= steps; i++) {
+        if (window.__replayStop) break;
+        const t = i / steps;
+        const e = easing(t);
+        node.size = [fromSize[0] + dx * e, fromSize[1] + dy * e];
+        app.canvas.setDirty(true, true);
+        await frm();
+      }
+      node.size = [toSize[0], toSize[1]];
+      app.canvas.setDirty(true, true);
+    } finally {
+      node.computeSize = origComputeSize;
+    }
   }
 
   async function dragTo(fx,fy,tx,ty,dur){dur=dur||700;await moveTo(fx,fy,400);await slp(100);ripple();await slp(100);
@@ -1298,10 +1438,27 @@
     const created = await addViaSearchDialog(nd, sp.x, sp.y);
     if(!created) log(step,total,'   ⚠️ Could not create: '+nd.type);
     if(created){
-      created.size=[nd.size[0],nd.size[1]];
+      const hasTargetSize = nd.size && typeof nd.size[0] === 'number' && typeof nd.size[1] === 'number';
+      // Capture default size BEFORE we set anything — used by the
+      // optional resize animation. Cheap whether or not we animate.
+      const defaultSize = [created.size[0], created.size[1]];
       created.pos=[nd.pos[0],nd.pos[1]];
       if(nd.title!==nd.type)created.title=nd.title;
-      app.canvas.setDirty(true,true);await slp(50);
+      if (USE_NODE_RESIZE && hasTargetSize) {
+        // Resolve the configured start size relative to the target.
+        const tgt = [nd.size[0], nd.size[1]];
+        let startSize;
+        if      (RESIZE_START === 'zero')    startSize = [1, 1];
+        else if (RESIZE_START === 'quarter') startSize = [tgt[0]/4, tgt[1]/4];
+        else if (RESIZE_START === 'half')    startSize = [tgt[0]/2, tgt[1]/2];
+        else                                  startSize = defaultSize;
+        app.canvas.setDirty(true,true);await slp(50);
+        await animateResize(created, startSize, tgt, RESIZE_DURATION, RESIZE_EASING);
+      } else {
+        // Original snap behavior.
+        if (hasTargetSize) created.size = [nd.size[0], nd.size[1]];
+        app.canvas.setDirty(true,true);await slp(50);
+      }
       if(nd.widgets_values&&created.widgets){
         for(let i=0;i<Math.min(created.widgets.length,nd.widgets_values.length);i++){
           const v=nd.widgets_values[i];if(v==null)continue;
@@ -1341,12 +1498,17 @@
       connectedLinks.add(li);step++;
       const sn=app.graph.getNodeById(refs[lk.srcId]),tn=app.graph.getNodeById(refs[lk.tgtId]);
       if(!sn||!tn)continue;
-      log(step,total, '🔗 '+(sn.title||sn.type)+'['+lk.srcSlot+'] → '+(tn.title||tn.type)+'['+lk.tgtSlot+']');
+      // Translate workflow-JSON slot indices to runtime slot indices.
+      // For autogrow / widget-as-input nodes the indices differ — see
+      // resolveSlot() above and discussion in conversation history.
+      const srcSlotIdx = resolveSlot(sn, false, lk.srcSlot, lk.srcSlotName);
+      const tgtSlotIdx = resolveSlot(tn, true,  lk.tgtSlot, lk.tgtSlotName);
+      log(step,total, '🔗 '+(sn.title||sn.type)+'['+srcSlotIdx+'] → '+(tn.title||tn.type)+'['+tgtSlotIdx+']');
       recStep('Link: '+sn.title+' -> '+tn.title);
       const midX=(sn.pos[0]+tn.pos[0])/2,midY=(sn.pos[1]+tn.pos[1])/2;
       if(USE_CAMERA_PAN) await panTo(midX,midY,400);
       const sp2=new Float32Array(2),tp2=new Float32Array(2);
-      sn.getConnectionPos(false,lk.srcSlot,sp2);tn.getConnectionPos(true,lk.tgtSlot,tp2);
+      sn.getConnectionPos(false,srcSlotIdx,sp2);tn.getConnectionPos(true,tgtSlotIdx,tp2);
       // ComfyCloud's Vue frontend renders the slot circle below where
       // getConnectionPos reports. Empirically the visual circle sits
       // ~NODE_SLOT_HEIGHT/2 lower in canvas coords, so the wire emerges
@@ -1355,7 +1517,7 @@
       const SLOT_Y_FIX = (typeof LiteGraph !== 'undefined' ? LiteGraph.NODE_SLOT_HEIGHT : 20) / 2;
       const ss=c2s(sp2[0],sp2[1]+SLOT_Y_FIX),ts=c2s(tp2[0],tp2[1]+SLOT_Y_FIX);
       await dragTo(ss.x,ss.y,ts.x,ts.y,600);await slp(50);
-      sn.connect(lk.srcSlot,tn,lk.tgtSlot);app.canvas.setDirty(true,true);await slp(DLY*0.3);
+      sn.connect(srcSlotIdx,tn,tgtSlotIdx);app.canvas.setDirty(true,true);await slp(DLY*0.3);
     }
     if (USE_CAMERA_ZOOM && USE_CAMERA_PAN) await cameraTo(nd.pos[0]+nd.size[0]/2, nd.pos[1]+nd.size[1]/2, 1.0, 500); // zoom back out after each node/link set
     await slp(stepDly * 0.5);
@@ -2514,6 +2676,32 @@
     const captionsToggle = document.getElementById('captions-toggle');
     captionsToggle.addEventListener('change', e => {
       showCaptions = e.target.checked;
+      regenerateScripts();
+    });
+
+    const nodeResizeToggle = document.getElementById('node-resize-toggle');
+    nodeResizeToggle.addEventListener('change', e => {
+      useNodeResize = e.target.checked;
+      regenerateScripts();
+    });
+
+    const resizeDurationSlider = document.getElementById('resize-duration');
+    const resizeDurationLabel = document.getElementById('resize-duration-label');
+    resizeDurationSlider.addEventListener('input', e => {
+      resizeDuration = parseInt(e.target.value, 10);
+      resizeDurationLabel.textContent = resizeDuration + 'ms';
+      regenerateScripts();
+    });
+
+    const resizeEasingSelect = document.getElementById('resize-easing');
+    resizeEasingSelect.addEventListener('change', e => {
+      resizeEasing = e.target.value;
+      regenerateScripts();
+    });
+
+    const resizeStartSelect = document.getElementById('resize-start');
+    resizeStartSelect.addEventListener('change', e => {
+      resizeStart = e.target.value;
       regenerateScripts();
     });
 
