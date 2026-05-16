@@ -487,12 +487,15 @@ async function generateVideo({ workflowJson, narrations, options = {}, send }) {
   send({ type: 'progress', step: 'record', message: 'Starting replay recording...' });
 
   await new Promise((resolve, reject) => {
+    const viewportW = options.viewportW || 1920;
+    const viewportH = options.viewportH || 1080;
     const replayArgs = [
       'cursor-replay.js',
       workflowFile,
       '--narrations', narrsFile,
       '--output', RECORDINGS,
       '--delay', String(options.delay || 800),
+      '--viewport', `${viewportW}x${viewportH}`,
     ];
     if (options.comfyUrl) replayArgs.push('--url', options.comfyUrl);
 
