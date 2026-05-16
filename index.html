@@ -2744,7 +2744,7 @@
             <div class="file-actions">
               <button class="btn btn-copy" id="copy-${safeId}" onclick="copyScript('${name}')">📋 Copy</button>
               <button class="btn btn-download" onclick="downloadScript('${name}')">⬇ Save</button>
-              <button class="btn-generate-video" id="genvid-${safeId}" onclick="studioGenerateVideo('${name}')">🎬 Generate Video</button>
+              <button class="btn-generate-video ${studioConnected ? 'studio-ready' : ''}" id="genvid-${safeId}" onclick="studioGenerateVideo('${name}')">🎬 Generate Video</button>
               <button class="btn btn-remove" onclick="removeFile('${name}')">✕</button>
             </div>
           `;
