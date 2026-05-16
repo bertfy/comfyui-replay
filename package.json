@@ -1,12 +1,13 @@
 {
   "name": "comfyui-workflow-replay",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Automated ComfyUI workflow replay with visible cursor for screen recording tutorials",
   "scripts": {
     "replay": "node cursor-replay.js",
     "replay:console": "node workflow-replay.js",
     "record": "node record-server.js",
-    "install-browsers": "npx playwright install chromium"
+    "install-browsers": "npx playwright install chromium",
+    "studio": "node studio.js"
   },
   "dependencies": {
     "playwright": "^1.50.0",

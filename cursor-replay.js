@@ -34,6 +34,7 @@ let viewportW = 1920;
 let viewportH = 1080;
 let recordVideo = true;
 let slowMo = 50;
+let narrationFile = null;
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--url" && args[i + 1]) {
@@ -54,6 +55,9 @@ for (let i = 0; i < args.length; i++) {
     recordVideo = false;
   } else if (args[i] === "--slow-mo" && args[i + 1]) {
     slowMo = parseInt(args[i + 1], 10);
+    i++;
+  } else if (args[i] === "--narrations" && args[i + 1]) {
+    narrationFile = args[i + 1];
     i++;
   } else if (!args[i].startsWith("--")) {
     inputFile = args[i];
@@ -97,6 +101,55 @@ const workflow = JSON.parse(raw);
 
 const nodes = workflow.nodes || [];
 const links = workflow.links || [];
+
+// ─── Narrations (Studio VO) ───────────────────────────────────────────────────
+
+// Format: { "nodeId": { "text": "...", "durationMs": 3200 }, ... }
+let narrations = {};
+if (narrationFile) {
+  try {
+    narrations = JSON.parse(fs.readFileSync(path.resolve(narrationFile), "utf-8"));
+    console.log(`🎙  Loaded narrations for ${Object.keys(narrations).length} nodes`);
+  } catch(e) {
+    console.warn(`⚠️  Could not load narrations file: ${e.message}`);
+  }
+}
+
+// Detect audio player available on this OS
+function getAudioPlayer() {
+  const platform = process.platform;
+  if (platform === "darwin") return { cmd: "afplay", args: f => [f] };
+  // Linux / Windows fallback: use ffplay (ships with ffmpeg)
+  return { cmd: "ffplay", args: f => ["-nodisp", "-autoexit", "-loglevel", "quiet", f] };
+}
+const audioPlayer = getAudioPlayer();
+
+// Play audio file async — returns { proc, promise }
+function playAudio(filePath) {
+  if (!fs.existsSync(filePath)) return { proc: null, promise: Promise.resolve() };
+  const { cmd, args } = audioPlayer;
+  const proc = require("child_process").spawn(cmd, args(filePath), {
+    stdio: "ignore",
+    detached: false,
+  });
+  const promise = new Promise(resolve => proc.on("close", resolve));
+  return { proc, promise };
+}
+
+// Play audio for a node and wait for it to finish (or at least its known duration)
+async function playNodeAudio(nodeId) {
+  const narr = narrations[nodeId] || narrations[String(nodeId)];
+  if (!narr?.audioFile) return;
+  if (!fs.existsSync(narr.audioFile)) return;
+  const { proc, promise } = playAudio(narr.audioFile);
+  if (narr.durationMs) {
+    // Wait the known duration then kill if still running
+    await sleep(narr.durationMs + 200);
+    try { proc?.kill(); } catch(e) {}
+  } else {
+    await promise;
+  }
+}
 
 if (nodes.length === 0) {
   console.error("Error: No nodes found in workflow JSON.");
@@ -377,6 +430,21 @@ function log(step, total, msg) {
       const title = node.title || node.type;
       log(currentStep, totalSteps, `➕ Adding: ${title} (${node.type})`);
 
+      // ── Studio VO: start audio for this node ──────────────────────────────
+      const _stepAudioStart = Date.now();
+      const _stepNarr = narrations[origId] || narrations[String(origId)];
+      let   _stepAudioProc = null;
+      if (_stepNarr?.audioFile && fs.existsSync(_stepNarr.audioFile)) {
+        const { cmd, args: afArgs } = audioPlayer;
+        _stepAudioProc = require("child_process").spawn(cmd, afArgs(_stepNarr.audioFile), {
+          stdio: "ignore", detached: false,
+        });
+        if (_stepNarr.durationMs) {
+          console.log(`🎙  Playing narration (${(_stepNarr.durationMs/1000).toFixed(1)}s)`);
+        }
+      }
+      // ── End Studio VO ────────────────────────────────────────────────────
+
       // Get the target screen position for this node
       const pos = node.pos || [100, 100];
       const posX = Array.isArray(pos) ? pos[0] : pos.x || 100;
@@ -636,6 +704,15 @@ function log(step, total, msg) {
       }
 
       await sleep(delay);
+
+      // ── Studio VO: wait for audio to finish before next step ─────────────
+      if (_stepNarr?.durationMs) {
+        const elapsed   = Date.now() - _stepAudioStart;
+        const remaining = _stepNarr.durationMs - elapsed + 300; // 300ms buffer
+        if (remaining > 0) await sleep(remaining);
+      }
+      try { _stepAudioProc?.kill(); } catch(e) {}
+      // ── End audio sync ────────────────────────────────────────────────────
     }
 
     // ── Connect Nodes ───────────────────────────────────────────

@@ -363,6 +363,54 @@
     }
     .btn-remove:hover { color: #f87171; border-color: #f87171; }
 
+    /* ── Studio ── */
+    .studio-badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 11px; font-weight: 600; padding: 4px 10px;
+      border-radius: 20px; border: 1px solid var(--border);
+      color: var(--muted); background: var(--surface2);
+      transition: all 0.3s; cursor: default; margin-left: auto;
+    }
+    .studio-badge.connected { color: var(--green); border-color: rgba(0,255,136,.3); background: rgba(0,255,136,.06); }
+    .studio-badge .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .studio-badge.connected .dot { animation: pulse-dot 2s infinite; }
+    @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+    .btn-generate-video {
+      display: none; align-items: center; gap: 6px;
+      background: linear-gradient(135deg, #7c3aed, #5b21b6);
+      color: #fff; border: none; padding: 7px 14px;
+      border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600;
+      transition: all 0.2s; white-space: nowrap;
+    }
+    .btn-generate-video.studio-ready { display: inline-flex; }
+    .btn-generate-video:hover { filter: brightness(1.2); transform: translateY(-1px); }
+    .btn-generate-video:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+    /* Studio modal */
+    .studio-overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,.7); backdrop-filter: blur(4px);
+      z-index: 9999; align-items: center; justify-content: center;
+    }
+    .studio-overlay.active { display: flex; }
+    .studio-modal {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 18px; padding: 32px; width: 480px; max-width: 90vw;
+      box-shadow: 0 40px 80px rgba(0,0,0,.6);
+    }
+    .studio-modal-title { font-size: 18px; font-weight: 700; margin-bottom: 24px; display: flex; align-items: center; gap: 10px; }
+    .studio-progress-bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin: 16px 0; }
+    .studio-progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 2px; transition: width 0.4s ease; width: 0%; }
+    .studio-log { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--muted); background: var(--bg); border-radius: 8px; padding: 12px; height: 160px; overflow-y: auto; margin-top: 12px; }
+    .studio-log div { padding: 2px 0; }
+    .studio-log .log-done { color: var(--green); }
+    .studio-log .log-err  { color: #f87171; }
+    .studio-done-actions { display: flex; gap: 10px; margin-top: 20px; }
+    .studio-done-actions button { flex: 1; padding: 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+    .studio-done-actions .btn-primary { background: linear-gradient(135deg, var(--accent), #0099cc); border-color: transparent; color: #000; }
+    .studio-done-actions button:hover { filter: brightness(1.1); }
+
     /* ── Instructions ── */
     .instructions {
       width: 100%;
@@ -632,6 +680,25 @@
 <body>
 
   <div class="app-layout">
+  <!-- Studio Modal Overlay -->
+  <div class="studio-overlay" id="studio-overlay">
+    <div class="studio-modal">
+      <div class="studio-modal-title">
+        <span>🎬</span>
+        <span id="studio-modal-title-text">Generating Video...</span>
+      </div>
+      <div id="studio-modal-step" style="font-size:14px;color:var(--muted);margin-bottom:8px;"></div>
+      <div class="studio-progress-bar">
+        <div class="studio-progress-fill" id="studio-progress-fill"></div>
+      </div>
+      <div class="studio-log" id="studio-log"></div>
+      <div class="studio-done-actions" id="studio-done-actions" style="display:none;">
+        <button onclick="document.getElementById('studio-overlay').classList.remove('active')">Close</button>
+        <button class="btn-primary" id="studio-download-btn">⬇ Download Video</button>
+      </div>
+    </div>
+  </div>
+
   <div class="app-left">
 
   <header>
@@ -639,7 +706,10 @@
       <div class="logo-icon">🎬</div>
       <h1>ComfyUI <span>Replay</span> Generator</h1>
     </div>
-    <p class="subtitle">Drag workflow JSON files → get animated console scripts instantly</p>
+    <p class="subtitle" style="display:flex;align-items:center;gap:10px;">
+      Drag workflow JSON files → get animated console scripts instantly
+      <span class="studio-badge" id="studio-badge"><span class="dot"></span> Studio Offline</span>
+    </p>
   </header>
 
   <!-- Unified Drop Zone -->
@@ -2674,6 +2744,7 @@
             <div class="file-actions">
               <button class="btn btn-copy" id="copy-${safeId}" onclick="copyScript('${name}')">📋 Copy</button>
               <button class="btn btn-download" onclick="downloadScript('${name}')">⬇ Save</button>
+              <button class="btn-generate-video" id="genvid-${safeId}" onclick="studioGenerateVideo('${name}')">🎬 Generate Video</button>
               <button class="btn btn-remove" onclick="removeFile('${name}')">✕</button>
             </div>
           `;
@@ -3118,6 +3189,167 @@
       }
       regenerateAll();
     });
+
+    // ── Studio WebSocket ────────────────────────────────────────────────────
+    // Connects to studio.js running locally (node studio.js)
+
+    let studioWs       = null;
+    let studioConnected = false;
+    let studioVideoUrl  = null;
+
+    const studioBadge = document.getElementById('studio-badge');
+    const studioOverlay = document.getElementById('studio-overlay');
+    const studioLog   = document.getElementById('studio-log');
+    const studioFill  = document.getElementById('studio-progress-fill');
+    const studioStep  = document.getElementById('studio-modal-step');
+    const studioDoneActions = document.getElementById('studio-done-actions');
+
+    function studioLog_(msg, cls = '') {
+      const d = document.createElement('div');
+      if (cls) d.className = cls;
+      d.textContent = msg;
+      studioLog.appendChild(d);
+      studioLog.scrollTop = studioLog.scrollHeight;
+    }
+
+    function studioConnect() {
+      try {
+        studioWs = new WebSocket('ws://localhost:3002');
+
+        studioWs.onopen = () => {
+          studioConnected = true;
+          studioBadge.textContent = '';
+          const dot = document.createElement('span'); dot.className = 'dot';
+          studioBadge.appendChild(dot);
+          studioBadge.appendChild(document.createTextNode(' Studio Connected'));
+          studioBadge.classList.add('connected');
+          // Show Generate Video buttons on all queue cards
+          document.querySelectorAll('.btn-generate-video').forEach(b => b.classList.add('studio-ready'));
+        };
+
+        studioWs.onclose = () => {
+          studioConnected = false;
+          studioBadge.innerHTML = '<span class="dot"></span> Studio Offline';
+          studioBadge.classList.remove('connected');
+          document.querySelectorAll('.btn-generate-video').forEach(b => b.classList.remove('studio-ready'));
+          // Retry every 5 seconds
+          setTimeout(studioConnect, 5000);
+        };
+
+        studioWs.onerror = () => studioWs.close();
+
+        studioWs.onmessage = (e) => {
+          const msg = JSON.parse(e.data);
+
+          if (msg.type === 'hello') {
+            console.log('Studio ready, TTS:', msg.capabilities?.tts);
+          }
+
+          if (msg.type === 'progress') {
+            studioStep.textContent = msg.message || '';
+            if (msg.step === 'tts' && msg.total) {
+              studioFill.style.width = `${Math.round((msg.current / msg.total) * 60)}%`;
+            } else if (msg.step === 'record') {
+              studioFill.style.width = '70%';
+            } else if (msg.step === 'mux') {
+              studioFill.style.width = '90%';
+            }
+            studioLog_(`▸ ${msg.message}`);
+          }
+
+          if (msg.type === 'status') {
+            studioLog_(msg.message);
+          }
+
+          if (msg.type === 'log') {
+            studioLog_(msg.message);
+          }
+
+          if (msg.type === 'done') {
+            studioFill.style.width = '100%';
+            studioStep.textContent = '✅ Complete!';
+            studioLog_(`✅ Saved: ${msg.filename}`, 'log-done');
+            document.getElementById('studio-modal-title-text').textContent = 'Video Ready!';
+            studioDoneActions.style.display = 'flex';
+            studioVideoUrl = msg.file;
+            const dlBtn = document.getElementById('studio-download-btn');
+            dlBtn.onclick = () => {
+              // Trigger download via studio — just notify, file is local
+              showToast(`✅ Video saved to recordings/${msg.filename}`);
+              studioOverlay.classList.remove('active');
+            };
+          }
+
+          if (msg.type === 'error') {
+            studioFill.style.width = '100%';
+            studioFill.style.background = '#ef4444';
+            studioStep.textContent = '❌ Error';
+            studioLog_(`❌ ${msg.message}`, 'log-err');
+            studioDoneActions.style.display = 'flex';
+            document.getElementById('studio-download-btn').style.display = 'none';
+          }
+        };
+      } catch(e) {
+        setTimeout(studioConnect, 5000);
+      }
+    }
+
+    // Try to connect to studio on page load
+    studioConnect();
+
+    window.studioGenerateVideo = (fileName) => {
+      if (!studioConnected) {
+        showToast('⚠️ Studio not connected — run: node studio.js');
+        return;
+      }
+      const item = files.get(fileName);
+      if (!item?._rawWorkflow) return;
+
+      // Prepare narrations array from current edits
+      const narrationMap = item.narrations || {};
+      const narrations   = Object.entries(narrationMap)
+        .filter(([id]) => id !== '__clear' && id !== '__queue')
+        .map(([nodeId, text]) => ({ nodeId, text: text?.trim?.() || text }))
+        .filter(n => n.text);
+
+      // Open modal
+      studioLog.innerHTML = '';
+      studioFill.style.width = '0%';
+      studioFill.style.background = '';
+      studioStep.textContent = 'Connecting to Comfy Cloud...';
+      studioDoneActions.style.display = 'none';
+      document.getElementById('studio-modal-title-text').textContent = 'Generating Video...';
+      document.getElementById('studio-download-btn').style.display = '';
+      studioOverlay.classList.add('active');
+
+      // Disable button while processing
+      const safeId = btoa(fileName).replace(/[^a-z0-9]/gi, '');
+      const btn    = document.getElementById(`genvid-${safeId}`);
+      if (btn) { btn.disabled = true; btn.textContent = '⏳ Working...'; }
+
+      studioWs.send(JSON.stringify({
+        type:      'generate',
+        workflow:  item._rawWorkflow,
+        narrations,
+        options: {
+          voice:    'Sarah (female, american)',
+          delay:    delay,
+          comfyUrl: 'http://127.0.0.1:8188',
+        },
+      }));
+
+      // Re-enable button when done or error
+      const origOnMessage = studioWs.onmessage;
+      const tmpHandler = (e) => {
+        origOnMessage(e);
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'done' || msg.type === 'error') {
+          if (btn) { btn.disabled = false; btn.textContent = '🎬 Generate Video'; }
+          studioWs.onmessage = origOnMessage;
+        }
+      };
+      studioWs.onmessage = tmpHandler;
+    };
   </script>
 </body>
 </html>
