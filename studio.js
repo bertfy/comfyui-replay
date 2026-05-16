@@ -24,8 +24,10 @@ const https = require('https');
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
-const WS_PORT     = 3002;
+const WS_PORT     = parseInt(process.env.WS_PORT || '3002', 10);
 const COMFY_BASE  = process.env.COMFY_CLOUD_URL || 'https://cloud.comfy.org';
+const COMFYUI_URL = process.env.COMFYUI_URL || 'http://127.0.0.1:8188';
+const HEADLESS    = process.env.PLAYWRIGHT_HEADLESS === 'true';
 const STUDIO_TMP  = path.resolve('./studio_tmp');
 const AUDIO_DIR   = path.resolve('./studio_tmp/audio');
 const RECORDINGS  = path.resolve('./recordings');
@@ -600,7 +602,10 @@ async function generateVideo({ workflowJson, narrations, options = {}, send }) {
       '--delay', String(options.delay || 800),
       '--viewport', `${viewportW}x${viewportH}`,
     ];
-    if (options.comfyUrl) replayArgs.push('--url', options.comfyUrl);
+    // Pick a ComfyUI URL: explicit option > env default
+    const comfyUrl = options.comfyUrl || COMFYUI_URL;
+    if (comfyUrl) replayArgs.push('--url', comfyUrl);
+    if (HEADLESS || options.headless) replayArgs.push('--headless');
 
     const proc = spawn('node', replayArgs, {
       cwd:   path.dirname(path.resolve('cursor-replay.js')),

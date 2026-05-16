@@ -35,6 +35,7 @@ let viewportH = 1080;
 let recordVideo = true;
 let slowMo = 50;
 let narrationFile = null;
+let headless = false;
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--url" && args[i + 1]) {
@@ -59,6 +60,8 @@ for (let i = 0; i < args.length; i++) {
   } else if (args[i] === "--narrations" && args[i + 1]) {
     narrationFile = args[i + 1];
     i++;
+  } else if (args[i] === "--headless") {
+    headless = true;
   } else if (!args[i].startsWith("--")) {
     inputFile = args[i];
   }
@@ -295,7 +298,7 @@ function log(step, total, msg) {
 
   // Launch browser
   const browser = await chromium.launch({
-    headless: false,
+    headless: headless,
     slowMo: slowMo,
     args: [
       `--window-size=${viewportW},${viewportH}`,
