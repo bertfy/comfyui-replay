@@ -487,8 +487,11 @@ async function generateVideo({ workflowJson, narrations, options = {}, send }) {
   send({ type: 'progress', step: 'record', message: 'Starting replay recording...' });
 
   await new Promise((resolve, reject) => {
-    const viewportW = options.viewportW || 1920;
-    const viewportH = options.viewportH || 1080;
+    // Always record at 16:9. Width-led: H derived so the ratio can't drift,
+    // even if a browser-side option tries to override only one dimension.
+    const rawW = options.viewportW || 1920;
+    const viewportW = rawW % 2 === 0 ? rawW : rawW + 1;
+    const viewportH = Math.round(viewportW * 9 / 16 / 2) * 2;
     const replayArgs = [
       'cursor-replay.js',
       workflowFile,
