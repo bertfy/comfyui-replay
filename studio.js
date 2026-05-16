@@ -419,10 +419,43 @@ async function convertSaveToApiFormat(wf) {
   return api;
 }
 
+// Priority list of well-known checkpoints likely to be preloaded on Comfy Cloud
+// pods. Ordered most-likely-available first.
+const KNOWN_GOOD_CHECKPOINTS = [
+  'v1-5-pruned-emaonly-fp16.safetensors',
+  'sd_xl_base_1.0.safetensors',
+  'sd_xl_turbo_1.0_fp16.safetensors',
+  'flux1-schnell-fp8.safetensors',
+  'flux1-dev-fp8.safetensors',
+  'Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors',
+];
+
+function pickBestSubstitute(originalValue, allowedList, nodeType, inputName) {
+  // 1. Substring/fuzzy match on the original value (handles cases like
+  //    "v1-5-pruned-emaonly" → "v1-5-pruned-emaonly-fp16")
+  const orig = String(originalValue).toLowerCase().replace(/\.(safetensors|ckpt|pt|bin)$/, '');
+  const exactish = allowedList.find(c => c.toLowerCase().includes(orig) || orig.includes(c.toLowerCase().replace(/\.(safetensors|ckpt|pt|bin)$/, '')));
+  if (exactish) return exactish;
+
+  // 2. For checkpoint inputs: walk the priority list and pick the first match
+  if (nodeType.toLowerCase().includes('checkpoint') || inputName.toLowerCase().includes('ckpt')) {
+    for (const known of KNOWN_GOOD_CHECKPOINTS) {
+      if (allowedList.includes(known)) return known;
+    }
+    // De-prioritize anything that looks like a controlnet/encoder/non-base
+    const baseLooking = allowedList.filter(c =>
+      !c.includes('/') &&
+      !/controlnet|encoder|lora|vae|upscal|inpaint/i.test(c)
+    );
+    if (baseLooking.length) return baseLooking[0];
+  }
+  // 3. Default: first allowed value
+  return allowedList[0];
+}
+
 // For each combo widget (where the schema lists allowed string values),
-// substitute any value not in the list with the first allowed value.
-// Lets us recover gracefully when a user's local model name isn't present
-// in the cloud's catalog. Mutates `api` in place.
+// substitute any value not in the list with a sensible alternative.
+// Mutates `api` in place.
 async function validateAndSubstituteCombos(api, onStatus) {
   const oi = await getObjectInfo();
   for (const [nodeId, node] of Object.entries(api)) {
@@ -433,10 +466,9 @@ async function validateAndSubstituteCombos(api, onStatus) {
       const spec = inputs[name];
       if (!spec) continue;
       const inner = Array.isArray(spec) ? spec[0] : spec;
-      // Combo with string options
       if (Array.isArray(inner) && inner.every(v => typeof v === 'string')) {
         if (!inner.includes(value)) {
-          const replacement = inner[0];
+          const replacement = pickBestSubstitute(value, inner, node.class_type, name);
           onStatus?.(`Substituting ${node.class_type}.${name}: "${value}" → "${replacement}"`);
           node.inputs[name] = replacement;
         }
