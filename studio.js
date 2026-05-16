@@ -341,36 +341,77 @@ function concatMp4s(parts, outputPath) {
   }
 }
 
-// Heuristic: convert ComfyUI save-format workflow to API format.
-// API format = { "<nodeId>": { class_type, inputs: { name: value | [srcId, slot] } } }
-// Save format = { nodes: [{id, type, widgets_values, inputs}], links: [[id, srcId, srcSlot, tgtId, tgtSlot, type]] }
-function convertSaveToApiFormat(wf) {
+// Cache object_info from the cloud — fetched lazily once per process.
+let _objectInfoCache = null;
+async function getObjectInfo() {
+  if (_objectInfoCache) return _objectInfoCache;
+  const resp = await fetch(`${COMFY_BASE}/api/object_info`, { headers: comfyHeaders() });
+  if (!resp.ok) throw new Error(`object_info fetch ${resp.status}`);
+  _objectInfoCache = await resp.json();
+  return _objectInfoCache;
+}
+
+// In ComfyUI object_info, `required.<name> = [typeOrComboList, options?]`.
+// typeOrComboList is an array → combo widget; "STRING|INT|FLOAT|BOOLEAN" → scalar widget;
+// anything else (e.g. "MODEL", "CLIP", "IMAGE", "LATENT") → link socket.
+const SCALAR_WIDGETS = new Set(['STRING', 'INT', 'FLOAT', 'BOOLEAN']);
+function isWidgetType(t) {
+  if (Array.isArray(t)) return true;
+  return SCALAR_WIDGETS.has(t);
+}
+
+// Convert ComfyUI save-format workflow to API format using authoritative
+// schemas from object_info. Save format may strip node.inputs entirely
+// (only widgets_values + the global wf.links table survive), so we walk the
+// canonical input order from the schema and consume widget values / link
+// slots in parallel.
+async function convertSaveToApiFormat(wf) {
   if (!wf.nodes || !Array.isArray(wf.nodes)) return wf; // already API format
-  const api = {};
-  const linksByTarget = new Map(); // tgtId -> [{tgtSlot, srcId, srcSlot}]
+  const oi = await getObjectInfo();
+
+  // tgtId -> Map(tgtSlot -> {srcId, srcSlot})
+  const linksByTarget = new Map();
   for (const link of wf.links || []) {
     const [, srcId, srcSlot, tgtId, tgtSlot] = link;
-    if (!linksByTarget.has(tgtId)) linksByTarget.set(tgtId, []);
-    linksByTarget.get(tgtId).push({ tgtSlot, srcId, srcSlot });
+    if (!linksByTarget.has(tgtId)) linksByTarget.set(tgtId, new Map());
+    linksByTarget.get(tgtId).set(tgtSlot, { srcId, srcSlot });
   }
+
+  const api = {};
   for (const node of wf.nodes) {
-    const inputs = {};
-    // Wire link inputs by input name
-    const nodeLinks = linksByTarget.get(node.id) || [];
-    for (const il of nodeLinks) {
-      const inputDef = node.inputs?.[il.tgtSlot];
-      const name = inputDef?.name || `input_${il.tgtSlot}`;
-      inputs[name] = [String(il.srcId), il.srcSlot];
+    const schema = oi[node.type];
+    if (!schema) {
+      // Unknown class — pass through with no inputs; cloud will reject and we'll log.
+      api[String(node.id)] = { class_type: node.type, inputs: {} };
+      continue;
     }
-    // Widget values: zip with widget names from node.inputs (the ones without a 'link')
-    // Best-effort — without object_info we can't know widget order exactly.
-    if (Array.isArray(node.widgets_values)) {
-      const widgetInputs = (node.inputs || []).filter(i => i.widget);
-      if (widgetInputs.length === node.widgets_values.length) {
-        widgetInputs.forEach((w, i) => { inputs[w.name] = node.widgets_values[i]; });
-      } else {
-        // Fall back to positional under generic keys — cloud may reject
-        node.widgets_values.forEach((v, i) => { inputs[`widget_${i}`] = v; });
+    const required = schema.input?.required || {};
+    const optional = schema.input?.optional || {};
+    const inputs   = {};
+    const wv       = node.widgets_values || [];
+    const tgtLinks = linksByTarget.get(node.id) || new Map();
+    let linkSlot   = 0;
+    let widgetIdx  = 0;
+
+    // Walk required first (their order matches what the frontend serialized),
+    // then optional.
+    for (const block of [required, optional]) {
+      for (const [name, spec] of Object.entries(block)) {
+        const innerType = Array.isArray(spec) ? spec[0] : spec;
+        if (isWidgetType(innerType)) {
+          if (widgetIdx < wv.length) {
+            inputs[name] = wv[widgetIdx++];
+            // ComfyUI's frontend injects a synthetic "control_after_generate"
+            // widget right after every INT input named seed/noise_seed.
+            if ((name === 'seed' || name === 'noise_seed') && innerType === 'INT') {
+              widgetIdx++; // skip the synthetic value
+            }
+          }
+        } else {
+          const link = tgtLinks.get(linkSlot);
+          if (link) inputs[name] = [String(link.srcId), link.srcSlot];
+          linkSlot++;
+        }
       }
     }
     api[String(node.id)] = { class_type: node.type, inputs };
@@ -378,9 +419,36 @@ function convertSaveToApiFormat(wf) {
   return api;
 }
 
+// For each combo widget (where the schema lists allowed string values),
+// substitute any value not in the list with the first allowed value.
+// Lets us recover gracefully when a user's local model name isn't present
+// in the cloud's catalog. Mutates `api` in place.
+async function validateAndSubstituteCombos(api, onStatus) {
+  const oi = await getObjectInfo();
+  for (const [nodeId, node] of Object.entries(api)) {
+    const schema = oi[node.class_type];
+    if (!schema) continue;
+    const inputs = { ...(schema.input?.required || {}), ...(schema.input?.optional || {}) };
+    for (const [name, value] of Object.entries(node.inputs || {})) {
+      const spec = inputs[name];
+      if (!spec) continue;
+      const inner = Array.isArray(spec) ? spec[0] : spec;
+      // Combo with string options
+      if (Array.isArray(inner) && inner.every(v => typeof v === 'string')) {
+        if (!inner.includes(value)) {
+          const replacement = inner[0];
+          onStatus?.(`Substituting ${node.class_type}.${name}: "${value}" → "${replacement}"`);
+          node.inputs[name] = replacement;
+        }
+      }
+    }
+  }
+}
+
 async function runWorkflowOnCloud(workflow, onStatus) {
   if (!COMFY_API_KEY) throw new Error('No Comfy Cloud key configured');
-  const apiWf = convertSaveToApiFormat(workflow);
+  const apiWf = await convertSaveToApiFormat(workflow);
+  await validateAndSubstituteCombos(apiWf, onStatus);
   onStatus?.('Submitting workflow to Comfy Cloud...');
   const sub = await comfyPost('/api/prompt', {
     prompt: apiWf,
