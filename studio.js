@@ -269,6 +269,165 @@ function muxVideoAudio(videoPath, audioPath, outputPath) {
   if (result.status !== 0) throw new Error(`ffmpeg mux failed: ${result.stderr}`);
 }
 
+function getMediaSize(filePath) {
+  try {
+    const out = execSync(
+      `ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "${filePath}"`,
+      { encoding: 'utf-8', timeout: 10000 }
+    ).trim();
+    const [w, h] = out.split(',').map(Number);
+    return { w, h };
+  } catch(e) { return { w: 1920, h: 1080 }; }
+}
+
+// Re-encode an image into an N-second mp4 segment with narration audio.
+// Pads/scales to match the build video's resolution so concat -c copy works.
+function buildImageSegment(imagePath, audioPath, durationSec, targetW, targetH, outputPath) {
+  const vf = `scale=${targetW}:${targetH}:force_original_aspect_ratio=decrease,` +
+             `pad=${targetW}:${targetH}:(ow-iw)/2:(oh-ih)/2:black,` +
+             `fps=30,format=yuv420p`;
+  const args = [
+    '-y',
+    '-loop', '1', '-t', String(durationSec), '-i', imagePath,
+    '-i', audioPath,
+    '-vf', vf,
+    '-c:v', 'libx264', '-preset', 'fast', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-ar', '44100', '-ac', '2',
+    '-shortest', '-movflags', '+faststart',
+    outputPath,
+  ];
+  const r = spawnSync('ffmpeg', args, { encoding: 'utf-8', timeout: 120000 });
+  if (r.status !== 0) throw new Error(`ffmpeg image-segment failed: ${r.stderr}`);
+}
+
+// Re-encode a video output to match build-video specs, with optional audio overlay.
+function buildVideoSegment(videoPath, audioPath, targetW, targetH, outputPath) {
+  const vf = `scale=${targetW}:${targetH}:force_original_aspect_ratio=decrease,` +
+             `pad=${targetW}:${targetH}:(ow-iw)/2:(oh-ih)/2:black,` +
+             `fps=30,format=yuv420p`;
+  const args = ['-y', '-i', videoPath];
+  if (audioPath) args.push('-i', audioPath);
+  args.push(
+    '-vf', vf,
+    '-c:v', 'libx264', '-preset', 'fast', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-ar', '44100', '-ac', '2',
+  );
+  if (audioPath) args.push('-map', '0:v:0', '-map', '1:a:0', '-shortest');
+  args.push('-movflags', '+faststart', outputPath);
+  const r = spawnSync('ffmpeg', args, { encoding: 'utf-8', timeout: 300000 });
+  if (r.status !== 0) throw new Error(`ffmpeg video-segment failed: ${r.stderr}`);
+}
+
+// Concat mp4 parts via the concat demuxer. Inputs must have matching codecs+params.
+function concatMp4s(parts, outputPath) {
+  const listFile = path.join(STUDIO_TMP, 'mp4_concat.txt');
+  const lines = parts.map(p => `file '${p.replace(/'/g, "'\\''")}'`).join('\n');
+  fs.writeFileSync(listFile, lines);
+  const r = spawnSync('ffmpeg', [
+    '-y', '-f', 'concat', '-safe', '0', '-i', listFile,
+    '-c', 'copy', '-movflags', '+faststart', outputPath,
+  ], { encoding: 'utf-8', timeout: 120000 });
+  if (r.status !== 0) {
+    // Fallback: re-encode on concat (codecs probably mismatched)
+    const filter = parts.map((_, i) => `[${i}:v:0][${i}:a:0]`).join('') +
+      `concat=n=${parts.length}:v=1:a=1[v][a]`;
+    const args = ['-y'];
+    for (const p of parts) args.push('-i', p);
+    args.push('-filter_complex', filter, '-map', '[v]', '-map', '[a]',
+      '-c:v', 'libx264', '-preset', 'fast', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-movflags', '+faststart', outputPath);
+    const r2 = spawnSync('ffmpeg', args, { encoding: 'utf-8', timeout: 300000 });
+    if (r2.status !== 0) throw new Error(`ffmpeg concat fallback failed: ${r2.stderr}`);
+  }
+}
+
+// Heuristic: convert ComfyUI save-format workflow to API format.
+// API format = { "<nodeId>": { class_type, inputs: { name: value | [srcId, slot] } } }
+// Save format = { nodes: [{id, type, widgets_values, inputs}], links: [[id, srcId, srcSlot, tgtId, tgtSlot, type]] }
+function convertSaveToApiFormat(wf) {
+  if (!wf.nodes || !Array.isArray(wf.nodes)) return wf; // already API format
+  const api = {};
+  const linksByTarget = new Map(); // tgtId -> [{tgtSlot, srcId, srcSlot}]
+  for (const link of wf.links || []) {
+    const [, srcId, srcSlot, tgtId, tgtSlot] = link;
+    if (!linksByTarget.has(tgtId)) linksByTarget.set(tgtId, []);
+    linksByTarget.get(tgtId).push({ tgtSlot, srcId, srcSlot });
+  }
+  for (const node of wf.nodes) {
+    const inputs = {};
+    // Wire link inputs by input name
+    const nodeLinks = linksByTarget.get(node.id) || [];
+    for (const il of nodeLinks) {
+      const inputDef = node.inputs?.[il.tgtSlot];
+      const name = inputDef?.name || `input_${il.tgtSlot}`;
+      inputs[name] = [String(il.srcId), il.srcSlot];
+    }
+    // Widget values: zip with widget names from node.inputs (the ones without a 'link')
+    // Best-effort — without object_info we can't know widget order exactly.
+    if (Array.isArray(node.widgets_values)) {
+      const widgetInputs = (node.inputs || []).filter(i => i.widget);
+      if (widgetInputs.length === node.widgets_values.length) {
+        widgetInputs.forEach((w, i) => { inputs[w.name] = node.widgets_values[i]; });
+      } else {
+        // Fall back to positional under generic keys — cloud may reject
+        node.widgets_values.forEach((v, i) => { inputs[`widget_${i}`] = v; });
+      }
+    }
+    api[String(node.id)] = { class_type: node.type, inputs };
+  }
+  return api;
+}
+
+async function runWorkflowOnCloud(workflow, onStatus) {
+  if (!COMFY_API_KEY) throw new Error('No Comfy Cloud key configured');
+  const apiWf = convertSaveToApiFormat(workflow);
+  onStatus?.('Submitting workflow to Comfy Cloud...');
+  const sub = await comfyPost('/api/prompt', {
+    prompt: apiWf,
+    extra_data: { api_key_comfy_org: COMFY_API_KEY },
+  });
+  const pid = sub.prompt_id || sub.id;
+  if (!pid) throw new Error(`No prompt_id from cloud submit: ${JSON.stringify(sub)}`);
+  onStatus?.(`Cloud job ${pid.slice(0, 8)}...`);
+  return await pollUntilDone(pid, onStatus, 600000);
+}
+
+// Walk job.outputs to find the primary visual result.
+// Returns { kind: 'image'|'video', filename, subfolder, type } or null.
+function extractPrimaryResult(job) {
+  const outputs = job.outputs || {};
+  // Prefer videos > gifs > images
+  const keysByKind = [
+    ['video',  ['videos', 'gifs', 'video', 'mp4']],
+    ['image',  ['images', 'image']],
+  ];
+  for (const [kind, keys] of keysByKind) {
+    for (const nodeOut of Object.values(outputs)) {
+      for (const k of keys) {
+        const arr = nodeOut[k];
+        if (Array.isArray(arr) && arr.length) {
+          const a = arr[0];
+          if (a.url) return { kind, url: a.url };
+          if (a.filename) return {
+            kind, filename: a.filename, subfolder: a.subfolder || '', type: a.type || 'output',
+          };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function buildResultViewUrl(result) {
+  if (result.url) return result.url;
+  const qs = new URLSearchParams({
+    filename:  result.filename,
+    subfolder: result.subfolder || '',
+    type:      result.type || 'output',
+  });
+  return `${COMFY_BASE}/api/view?${qs}`;
+}
+
 function findLatestWebm(dir) {
   const files = fs.readdirSync(dir)
     .filter(f => f.endsWith('.webm'))
@@ -362,11 +521,57 @@ async function generateVideo({ workflowJson, narrations, options = {}, send }) {
   await sleep(1000); // Let Playwright finalize the file
   const webmPath = findLatestWebm(RECORDINGS);
 
-  // 7. Mux video + audio → final mp4
-  muxVideoAudio(webmPath, audioAllFile, finalVideo);
-
-  // 8. Clean up webm
+  // 7. Mux video + audio → build-only mp4
+  const buildMp4 = path.join(STUDIO_TMP, `build_${timestamp}.mp4`);
+  muxVideoAudio(webmPath, audioAllFile, buildMp4);
   try { fs.unlinkSync(webmPath); } catch(e) {}
+
+  // 8. Run workflow on Comfy Cloud → fetch primary result → append as final segment
+  let resultSegment = null;
+  try {
+    send({ type: 'progress', step: 'cloud_run', message: '☁️  Running workflow on Comfy Cloud...' });
+    const job    = await runWorkflowOnCloud(workflowJson,
+      msg => send({ type: 'status', message: msg }));
+    const result = extractPrimaryResult(job);
+    if (!result) throw new Error('No image/video output found in cloud job');
+
+    const url     = buildResultViewUrl(result);
+    const ext     = result.kind === 'video' ? 'mp4' : 'png';
+    const resPath = path.join(STUDIO_TMP, `result_${timestamp}.${ext}`);
+    send({ type: 'status', message: `Downloading result (${result.kind})...` });
+    await downloadFile(url, resPath);
+
+    // Closing narration
+    const closingText = result.kind === 'video'
+      ? 'And here is the rendered video.'
+      : 'And here is the final result.';
+    const closingMp3 = path.join(AUDIO_DIR, `closing_${timestamp}.mp3`);
+    send({ type: 'status', message: 'Generating closing narration...' });
+    await generateAudioClip(closingText, closingMp3, voice,
+      msg => send({ type: 'status', message: msg }));
+
+    // Match build video specs so concat -c copy works
+    const { w, h } = getMediaSize(buildMp4);
+    resultSegment  = path.join(STUDIO_TMP, `result_segment_${timestamp}.mp4`);
+    send({ type: 'progress', step: 'cloud_append', message: 'Building result segment...' });
+    if (result.kind === 'image') {
+      buildImageSegment(resPath, closingMp3, 8, w, h, resultSegment);
+    } else {
+      buildVideoSegment(resPath, closingMp3, w, h, resultSegment);
+    }
+  } catch(err) {
+    send({ type: 'log', message: `⚠️  Cloud-append step failed: ${err.message}` });
+    send({ type: 'log', message: '   Falling back to build-only video.' });
+  }
+
+  // 9. Final concat (or just rename build if cloud step failed)
+  if (resultSegment) {
+    send({ type: 'progress', step: 'concat', message: 'Concatenating final video...' });
+    concatMp4s([buildMp4, resultSegment], finalVideo);
+    try { fs.unlinkSync(buildMp4); fs.unlinkSync(resultSegment); } catch(e) {}
+  } else {
+    fs.renameSync(buildMp4, finalVideo);
+  }
 
   return finalVideo;
 }
