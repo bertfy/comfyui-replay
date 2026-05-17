@@ -303,6 +303,13 @@ function log(step, total, msg) {
     args: [
       `--window-size=${viewportW},${viewportH}`,
       "--disable-blink-features=AutomationControlled",
+      // Container-safe flags: Docker's default /dev/shm (64MB) is too small
+      // for a 1920x1080 Chromium; without these we get "Target crashed".
+      // Harmless when running headed locally.
+      "--disable-dev-shm-usage",
+      "--no-sandbox",
+      "--disable-gpu",
+      "--disable-software-rasterizer",
     ],
   });
 
