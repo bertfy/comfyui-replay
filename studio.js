@@ -595,7 +595,9 @@ async function generateVideo({ workflowJson, narrations, options = {}, send }) {
   await new Promise((resolve, reject) => {
     // Always record at 16:9. Width-led: H derived so the ratio can't drift,
     // even if a browser-side option tries to override only one dimension.
-    const rawW = options.viewportW || 1920;
+    // Default 1280 (720p) — fits in a Railway/Fly small container's RAM budget
+    // for Chromium without OOM. Bump via options.viewportW if you have more RAM.
+    const rawW = options.viewportW || 1280;
     const viewportW = rawW % 2 === 0 ? rawW : rawW + 1;
     const viewportH = Math.round(viewportW * 9 / 16 / 2) * 2;
     const replayArgs = [
