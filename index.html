@@ -3286,11 +3286,21 @@
             studioLog_(`✅ Saved: ${msg.filename}`, 'log-done');
             document.getElementById('studio-modal-title-text').textContent = 'Video Ready!';
             studioDoneActions.style.display = 'flex';
-            studioVideoUrl = msg.file;
+            // Build a download URL from the studio origin so the browser fetches
+            // directly from the worker (works whether local or Railway-hosted).
+            const studioOrigin = resolveStudioUrl().replace(/^ws/, 'http').replace(/\/$/, '');
+            studioVideoUrl = msg.downloadPath ? studioOrigin + msg.downloadPath : null;
             const dlBtn = document.getElementById('studio-download-btn');
             dlBtn.onclick = () => {
-              // Trigger download via studio — just notify, file is local
-              showToast(`✅ Video saved to recordings/${msg.filename}`);
+              if (studioVideoUrl) {
+                const a = document.createElement('a');
+                a.href = studioVideoUrl;
+                a.download = msg.filename;
+                document.body.appendChild(a); a.click(); a.remove();
+                showToast(`⬇ Downloading ${msg.filename}…`);
+              } else {
+                showToast(`✅ Video saved on server as ${msg.filename}`);
+              }
               studioOverlay.classList.remove('active');
             };
           }

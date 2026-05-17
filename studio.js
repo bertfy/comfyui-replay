@@ -690,12 +690,34 @@ async function generateVideo({ workflowJson, narrations, options = {}, send }) {
 
 // ── WebSocket Server ──────────────────────────────────────────────────────────
 
-// Also serve a tiny HTTP response so the browser can check studio is running
+// HTTP server: status JSON at /, mp4 download at /file/<filename>.
+// Filename is validated to prevent path traversal — only basenames inside RECORDINGS.
 const httpServer = http.createServer((req, res) => {
-  res.writeHead(200, {
-    'Content-Type':                'application/json',
-    'Access-Control-Allow-Origin': '*',
-  });
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const cors = { 'Access-Control-Allow-Origin': '*' };
+
+  if (url.pathname.startsWith('/file/')) {
+    const requested = url.pathname.slice('/file/'.length);
+    const safe = path.basename(requested);                       // strip any path segments
+    const full = path.join(RECORDINGS, safe);
+    if (safe !== requested || !full.startsWith(RECORDINGS + path.sep)) {
+      res.writeHead(400, cors); return res.end('Bad filename');
+    }
+    if (!fs.existsSync(full)) {
+      res.writeHead(404, cors); return res.end('Not found');
+    }
+    const stat = fs.statSync(full);
+    res.writeHead(200, {
+      ...cors,
+      'Content-Type':        safe.endsWith('.mp4') ? 'video/mp4' : 'application/octet-stream',
+      'Content-Length':      stat.size,
+      'Content-Disposition': `attachment; filename="${safe}"`,
+      'Accept-Ranges':       'bytes',
+    });
+    return fs.createReadStream(full).pipe(res);
+  }
+
+  res.writeHead(200, { ...cors, 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ status: 'studio_ready', version: '1.0.0' }));
 });
 
@@ -729,7 +751,13 @@ wss.on('connection', ws => {
           options:      msg.options || {},
           send,
         });
-        send({ type: 'done', file: finalPath, filename: path.basename(finalPath) });
+        const filename = path.basename(finalPath);
+        send({
+          type:     'done',
+          file:     finalPath,           // server-side absolute path (useful for local dev)
+          filename: filename,
+          downloadPath: `/file/${encodeURIComponent(filename)}`,  // browser builds full URL from its own origin
+        });
         console.log(`✅ Done → ${finalPath}`);
       } catch(err) {
         console.error('❌ Error:', err.message);
