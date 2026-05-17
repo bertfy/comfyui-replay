@@ -16,6 +16,18 @@ https://github.com/user-attachments/assets/9b6af309-b560-4d28-8e1c-6f606443ec92
 
 
 
+## Deploy your own
+
+The frontend (UI) splits from the worker (studio + ComfyUI + Playwright + ffmpeg) — Vercel hosts the frontend, Railway runs the worker.
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fbertfy%2Fcomfyui-replay&env=STUDIO_URL&envDescription=WebSocket+URL+of+your+Railway+worker%2C+e.g.+wss%3A%2F%2Fyour-app.up.railway.app)
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https%3A%2F%2Fgithub.com%2Fbertfy%2Fcomfyui-replay)
+
+1. **Railway first** — click the button, deploy from this repo. Add `COMFY_API_KEY` in Variables. Generate a public domain in Settings → Networking. Copy the `wss://…` URL.
+2. **Vercel second** — click the button, paste the Railway WebSocket URL into the `STUDIO_URL` env var. Deploy. Visit the Vercel URL.
+
+Local-only: keep using `npm run studio` + open `index.html`. The frontend's WebSocket URL auto-detects (`?studio=` query → injected env → localhost fallback).
+
 ## Setup
 
 ```bash
