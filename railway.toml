@@ -1,0 +1,14 @@
+# Railway build/runtime config — committed so deploys are reproducible.
+# https://docs.railway.com/reference/config-as-code
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Restart on crash; no replicas (worker is stateful, single instance).
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
+
+# Healthcheck: studio.js serves a JSON status at the WebSocket port.
+healthcheckPath = "/"
+healthcheckTimeout = 30

@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- Vercel: set STUDIO_URL env var; this placeholder is substituted at build time -->
+  <meta name="studio-url" content="{{STUDIO_URL}}" />
   <title>ComfyUI Replay Generator</title>
   <script src="https://unpkg.com/lucide@latest"></script>
   <style>
@@ -3212,9 +3214,22 @@
       studioLog.scrollTop = studioLog.scrollHeight;
     }
 
+    // Studio WebSocket URL resolution:
+    //   1. ?studio=wss://...        — explicit query override (handy for testing prod from any host)
+    //   2. window.__STUDIO_URL      — injected by build (Vercel env var → meta tag, see deploy docs)
+    //   3. ws://localhost:3002      — local dev default
+    function resolveStudioUrl() {
+      const q = new URLSearchParams(location.search).get('studio');
+      if (q) return q;
+      if (window.__STUDIO_URL)  return window.__STUDIO_URL;
+      const meta = document.querySelector('meta[name="studio-url"]')?.content;
+      if (meta && !meta.startsWith('{{'))  return meta;  // skip un-substituted placeholder
+      return 'ws://localhost:3002';
+    }
+
     function studioConnect() {
       try {
-        studioWs = new WebSocket('ws://localhost:3002');
+        studioWs = new WebSocket(resolveStudioUrl());
 
         studioWs.onopen = () => {
           studioConnected = true;

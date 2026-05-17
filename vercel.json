@@ -1,0 +1,7 @@
+{
+  "buildCommand": "if [ -n \"$STUDIO_URL\" ]; then sed -i 's|{{STUDIO_URL}}|'\"$STUDIO_URL\"'|g' index.html; else echo 'Warning: STUDIO_URL env var not set; frontend will fall back to ws://localhost:3002'; fi",
+  "outputDirectory": ".",
+  "framework": null,
+  "trailingSlash": false,
+  "cleanUrls": true
+}

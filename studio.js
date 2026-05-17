@@ -24,7 +24,8 @@ const https = require('https');
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
-const WS_PORT     = parseInt(process.env.WS_PORT || '3002', 10);
+// PORT is Railway/Render convention; WS_PORT lets us be explicit locally.
+const WS_PORT     = parseInt(process.env.PORT || process.env.WS_PORT || '3002', 10);
 const COMFY_BASE  = process.env.COMFY_CLOUD_URL || 'https://cloud.comfy.org';
 const COMFYUI_URL = process.env.COMFYUI_URL || 'http://127.0.0.1:8188';
 const HEADLESS    = process.env.PLAYWRIGHT_HEADLESS === 'true';
