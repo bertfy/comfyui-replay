@@ -1,5 +1,5 @@
 {
-  "buildCommand": "if [ -n \"$STUDIO_URL\" ]; then sed -i 's|{{STUDIO_URL}}|'\"$STUDIO_URL\"'|g' index.html; else echo 'Warning: STUDIO_URL env var not set; frontend will fall back to ws://localhost:3002'; fi",
+  "buildCommand": "if [ -n \"$STUDIO_URL\" ]; then sed -i 's|{{STUDIO_URL}}|'\"$STUDIO_URL\"'|g' index.html; else echo 'Warning: STUDIO_URL env var not set; frontend will fall back to ws://localhost:3002'; fi && if [ -n \"$STUDIO_SECRET\" ]; then sed -i 's|{{STUDIO_SECRET}}|'\"$STUDIO_SECRET\"'|g' index.html; else echo 'Warning: STUDIO_SECRET env var not set; frontend will connect without a token (only works if worker has no STUDIO_SECRET either)'; fi",
   "outputDirectory": ".",
   "framework": null,
   "trailingSlash": false,

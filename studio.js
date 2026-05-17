@@ -29,6 +29,9 @@ const WS_PORT     = parseInt(process.env.PORT || process.env.WS_PORT || '3002', 
 const COMFY_BASE  = process.env.COMFY_CLOUD_URL || 'https://cloud.comfy.org';
 const COMFYUI_URL = process.env.COMFYUI_URL || 'http://127.0.0.1:8188';
 const HEADLESS    = process.env.PLAYWRIGHT_HEADLESS === 'true';
+// Optional shared-secret auth. If set, WS connections + /file/ downloads
+// must include ?token=<value>. Empty/unset = no auth (local dev).
+const STUDIO_SECRET = process.env.STUDIO_SECRET || '';
 const STUDIO_TMP  = path.resolve('./studio_tmp');
 const AUDIO_DIR   = path.resolve('./studio_tmp/audio');
 const RECORDINGS  = path.resolve('./recordings');
@@ -697,6 +700,9 @@ const httpServer = http.createServer((req, res) => {
   const cors = { 'Access-Control-Allow-Origin': '*' };
 
   if (url.pathname.startsWith('/file/')) {
+    if (STUDIO_SECRET && url.searchParams.get('token') !== STUDIO_SECRET) {
+      res.writeHead(401, cors); return res.end('Unauthorized');
+    }
     const requested = url.pathname.slice('/file/'.length);
     const safe = path.basename(requested);                       // strip any path segments
     const full = path.join(RECORDINGS, safe);
@@ -723,7 +729,16 @@ const httpServer = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server: httpServer });
 
-wss.on('connection', ws => {
+wss.on('connection', (ws, req) => {
+  // Enforce shared-secret auth on WS handshake (if configured)
+  if (STUDIO_SECRET) {
+    const url = new URL(req.url, 'http://x');
+    if (url.searchParams.get('token') !== STUDIO_SECRET) {
+      console.log('🔒 Rejected unauthorized WS connection');
+      ws.close(1008, 'Unauthorized');
+      return;
+    }
+  }
   console.log('🖥  Browser connected');
 
   function send(obj) {

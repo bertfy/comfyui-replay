@@ -3,8 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <!-- Vercel: set STUDIO_URL env var; this placeholder is substituted at build time -->
+  <!-- Vercel: set STUDIO_URL + STUDIO_SECRET env vars; placeholders substituted at build time -->
   <meta name="studio-url" content="{{STUDIO_URL}}" />
+  <meta name="studio-secret" content="{{STUDIO_SECRET}}" />
   <title>ComfyUI Replay Generator</title>
   <script src="https://unpkg.com/lucide@latest"></script>
   <style>
@@ -3218,13 +3219,28 @@
     //   1. ?studio=wss://...        — explicit query override (handy for testing prod from any host)
     //   2. window.__STUDIO_URL      — injected by build (Vercel env var → meta tag, see deploy docs)
     //   3. ws://localhost:3002      — local dev default
-    function resolveStudioUrl() {
+    function resolveStudioBaseUrl() {
       const q = new URLSearchParams(location.search).get('studio');
       if (q) return q;
       if (window.__STUDIO_URL)  return window.__STUDIO_URL;
       const meta = document.querySelector('meta[name="studio-url"]')?.content;
       if (meta && !meta.startsWith('{{'))  return meta;  // skip un-substituted placeholder
       return 'ws://localhost:3002';
+    }
+    function resolveStudioSecret() {
+      const q = new URLSearchParams(location.search).get('token');
+      if (q) return q;
+      const meta = document.querySelector('meta[name="studio-secret"]')?.content;
+      if (meta && !meta.startsWith('{{'))  return meta;
+      return '';
+    }
+    // Append ?token= if a secret is configured. Studio rejects WS/HTTP without it.
+    function resolveStudioUrl() {
+      const base = resolveStudioBaseUrl();
+      const token = resolveStudioSecret();
+      if (!token) return base;
+      const sep = base.includes('?') ? '&' : '?';
+      return `${base}${sep}token=${encodeURIComponent(token)}`;
     }
 
     function studioConnect() {
@@ -3286,10 +3302,14 @@
             studioLog_(`✅ Saved: ${msg.filename}`, 'log-done');
             document.getElementById('studio-modal-title-text').textContent = 'Video Ready!';
             studioDoneActions.style.display = 'flex';
-            // Build a download URL from the studio origin so the browser fetches
+            // Build a download URL from the studio host so the browser fetches
             // directly from the worker (works whether local or Railway-hosted).
-            const studioOrigin = resolveStudioUrl().replace(/^ws/, 'http').replace(/\/$/, '');
-            studioVideoUrl = msg.downloadPath ? studioOrigin + msg.downloadPath : null;
+            // Reconstruct from the base (without token query) and re-append token,
+            // since downloadPath itself is path-only.
+            const studioOrigin = resolveStudioBaseUrl().replace(/^ws/, 'http').replace(/\/$/, '');
+            const token        = resolveStudioSecret();
+            const tokenQS      = token ? `?token=${encodeURIComponent(token)}` : '';
+            studioVideoUrl = msg.downloadPath ? studioOrigin + msg.downloadPath + tokenQS : null;
             const dlBtn = document.getElementById('studio-download-btn');
             dlBtn.onclick = () => {
               if (studioVideoUrl) {
