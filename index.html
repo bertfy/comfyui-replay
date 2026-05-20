@@ -794,6 +794,28 @@
 
     <div class="option-row">
       <div class="option-meta">
+        <div class="option-label">Keep Everything In View</div>
+        <div class="option-desc">After each placement, smoothly re-frames the camera to fit all nodes so far. Prevents the graph from drifting off-screen as it grows. Also frames source + destination together during humanistic copy-paste.</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="autofit-toggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Humanistic Mode</div>
+        <div class="option-desc">Detects duplicated nodes and clusters. Rather than rebuilding each one from scratch, the replay selects the original, copy-pastes it, repositions, then tweaks any differing widget values — the way a real user would work.</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="humanistic-toggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
         <div class="option-label">Animate Combo Selection</div>
         <div class="option-desc">For Vue-rendered nodes, cursor visits the combo widget, opens its dropdown, and clicks the target option — driving the real PrimeVue Select. Falls back to silent set if the node isn't a Vue node.</div>
       </div>
@@ -958,6 +980,8 @@
     let showCaptions = false;
     let useNodeResize = true;
     let useComboUI = true;
+    let useHumanistic = false;
+    let useAutoFit = false;
     let typingDelay = 50;
     let resizeDuration = 500;
     let resizeEasing = 'cubic';
@@ -1043,6 +1067,143 @@
         properties: n.properties || null,
       }));
 
+      // ── Humanistic-mode clone detection ───────────────────────────
+      // Find duplicated nodes/clusters so the replay can copy-paste
+      // them instead of rebuilding every node from scratch. The plan
+      // is purely a hint — the runtime falls back to fresh-build for
+      // any clone whose original isn't ready in time.
+      const clonePlan = (function buildClonePlan() {
+        const nodeById = new Map(nodesData.map(n => [n.id, n]));
+        const widgetDiff = (orig, clone) => {
+          const o = orig.widgets_values || [], c = clone.widgets_values || [];
+          const diffs = [];
+          for (let i = 0; i < Math.max(o.length, c.length); i++) {
+            const ov = o[i], cv = c[i];
+            if (cv === undefined) continue;
+            const same = (typeof ov === 'object' && typeof cv === 'object')
+              ? JSON.stringify(ov) === JSON.stringify(cv)
+              : ov === cv;
+            if (!same) diffs.push({ idx: i, value: cv });
+          }
+          return diffs;
+        };
+
+        // Undirected adjacency over the replay nodeset
+        const adj = new Map();
+        for (const n of nodesData) adj.set(n.id, new Set());
+        for (const [, srcId, , tgtId] of links) {
+          if (adj.has(srcId) && adj.has(tgtId)) {
+            adj.get(srcId).add(tgtId);
+            adj.get(tgtId).add(srcId);
+          }
+        }
+        const seen = new Set();
+        const components = [];
+        for (const n of nodesData) {
+          if (seen.has(n.id)) continue;
+          const stack = [n.id], comp = [];
+          while (stack.length) {
+            const id = stack.pop();
+            if (seen.has(id)) continue;
+            seen.add(id); comp.push(id);
+            for (const nb of adj.get(id) || []) if (!seen.has(nb)) stack.push(nb);
+          }
+          components.push(comp);
+        }
+
+        // Group multi-node components by canonical signature.
+        // Mapping between two instances is positional after sorting
+        // each component by (type, id) — good enough for the typical
+        // "two-of-the-same chain" pattern; mismatched edges fall out
+        // of the signature and stay unmatched.
+        const groups = new Map();
+        for (const comp of components) {
+          if (comp.length < 2) continue;
+          const sorted = [...comp].sort((a, b) => {
+            const ta = nodeById.get(a).type, tb = nodeById.get(b).type;
+            if (ta !== tb) return ta < tb ? -1 : 1;
+            return a - b;
+          });
+          const posByOrig = new Map(sorted.map((id, i) => [id, i]));
+          const edges = [];
+          for (const [, srcId, srcSlot, tgtId, tgtSlot] of links) {
+            if (posByOrig.has(srcId) && posByOrig.has(tgtId)) {
+              edges.push([posByOrig.get(srcId), posByOrig.get(tgtId), srcSlot, tgtSlot]);
+            }
+          }
+          edges.sort((a,b) => a[0]-b[0] || a[1]-b[1] || a[2]-b[2] || a[3]-b[3]);
+          const sig = JSON.stringify({ t: sorted.map(id => nodeById.get(id).type), e: edges });
+          if (!groups.has(sig)) groups.set(sig, []);
+          groups.get(sig).push(sorted);
+        }
+
+        const clusters = []; // {originalIds, clones:[{cloneIds, idMap, widgetDiffs}]}
+        const inMatchedCluster = new Set();
+        for (const [, instances] of groups) {
+          if (instances.length < 2) continue;
+          const originalIds = instances[0];
+          for (const id of originalIds) inMatchedCluster.add(id);
+          const cloneEntries = [];
+          for (let i = 1; i < instances.length; i++) {
+            const cloneIds = instances[i];
+            const idMap = {};
+            const widgetDiffs = {};
+            for (let j = 0; j < originalIds.length; j++) {
+              const oId = originalIds[j], cId = cloneIds[j];
+              idMap[oId] = cId;
+              inMatchedCluster.add(cId);
+              const d = widgetDiff(nodeById.get(oId), nodeById.get(cId));
+              if (d.length) widgetDiffs[oId] = d;
+            }
+            cloneEntries.push({ cloneIds, idMap, widgetDiffs });
+          }
+          clusters.push({ originalIds, clones: cloneEntries });
+        }
+
+        // Single-node clones — only for nodes whose connected component
+        // is size 1 (i.e. real singletons in the placement set). Skipping
+        // singletons inside multi-node components avoids tangling with
+        // the cluster heuristic.
+        const singletonIds = components.filter(c => c.length === 1).map(c => c[0]);
+        const byType = new Map();
+        for (const id of singletonIds) {
+          const n = nodeById.get(id);
+          if (!byType.has(n.type)) byType.set(n.type, []);
+          byType.get(n.type).push(id);
+        }
+        const singles = []; // {originalId, cloneId, widgetDiffs}
+        for (const [, ids] of byType) {
+          if (ids.length < 2) continue;
+          const origId = ids[0];
+          for (let i = 1; i < ids.length; i++) {
+            singles.push({
+              originalId: origId,
+              cloneId: ids[i],
+              widgetDiffs: widgetDiff(nodeById.get(origId), nodeById.get(ids[i])),
+            });
+          }
+        }
+
+        // Internal links within each matched cluster — these come along
+        // for free with paste, so the runtime should skip the visible
+        // drag for them and mark them as already-connected.
+        const clusterInternalLinks = new Set();
+        for (const cluster of clusters) {
+          const allIds = new Set(cluster.originalIds);
+          for (const cl of cluster.clones) for (const id of cl.cloneIds) allIds.add(id);
+          for (let li = 0; li < links.length; li++) {
+            const [, srcId, , tgtId] = links[li];
+            if (allIds.has(srcId) && allIds.has(tgtId)) clusterInternalLinks.add(li);
+          }
+        }
+
+        return {
+          clusters,
+          singles,
+          clusterInternalLinks: [...clusterInternalLinks],
+        };
+      })();
+
       // Slot names from the workflow JSON are critical for autogrow /
       // widget-as-input nodes (Gemini, Grok, etc.) where the runtime
       // node.inputs[] array contains widgets-converted-to-inputs that
@@ -1094,6 +1255,9 @@
   const SHOW_CAPTIONS = ${showCaptions};
   const USE_NODE_RESIZE = ${useNodeResize};
   const USE_COMBO_UI = ${useComboUI};
+  const USE_HUMANISTIC = ${useHumanistic};
+  const USE_AUTO_FIT = ${useAutoFit};
+  const CLONE_PLAN = ${JSON.stringify(clonePlan)};
   const TYPING_DELAY = ${typingDelay};
   const RESIZE_DURATION = ${resizeDuration};
   const RESIZE_EASING = '${resizeEasing}';
@@ -1738,6 +1902,327 @@
     if(t==='text'||t==='string'||t==='customtext')return true;if(w.options?.multiline)return true;
     if(typeof w.value==='string'&&w.value.length>20)return true;return false;}
 
+  // ── Humanistic-mode runtime helpers ────────────────────────────
+  // Pre-indexed views over CLONE_PLAN so the main loop can ask
+  // O(1) questions like "is this node a clone?" / "which cluster
+  // does it trigger?". Empty/no-op when USE_HUMANISTIC is false.
+  const cloneByCloneId = new Map();          // cloneNodeId -> {originalId, widgetDiffs}
+  const clusterByTriggerId = new Map();      // first-clone-id-in-topo -> {originalIds, cloneIds, idMap, widgetDiffs}
+  const skipPlacement = new Set();           // clone node ids that the cluster routine will place
+  const internalLinkSet = new Set(USE_HUMANISTIC ? (CLONE_PLAN.clusterInternalLinks || []) : []);
+
+  if (USE_HUMANISTIC) {
+    for (const s of (CLONE_PLAN.singles || [])) {
+      cloneByCloneId.set(s.cloneId, { kind: 'single', originalId: s.originalId, widgetDiffs: s.widgetDiffs });
+    }
+    // For each cluster-clone, the "trigger" is whichever of its node
+    // ids appears first in NODES (topo) order — that's when we run
+    // the marquee+copy+paste routine and mark the rest skipped.
+    const orderIdx = new Map(NODES.map((n, i) => [n.id, i]));
+    for (const cluster of (CLONE_PLAN.clusters || [])) {
+      for (const cl of cluster.clones) {
+        let triggerId = cl.cloneIds[0], best = Infinity;
+        for (const id of cl.cloneIds) {
+          const i = orderIdx.has(id) ? orderIdx.get(id) : Infinity;
+          if (i < best) { best = i; triggerId = id; }
+        }
+        clusterByTriggerId.set(triggerId, {
+          originalIds: cluster.originalIds,
+          cloneIds: cl.cloneIds,
+          idMap: cl.idMap,
+          widgetDiffs: cl.widgetDiffs,
+        });
+        for (const id of cl.cloneIds) if (id !== triggerId) skipPlacement.add(id);
+      }
+    }
+  }
+
+  // Wait for a node to land in app.graph (paste is async-ish in the Vue front-end).
+  async function waitForNodes(predicate, timeoutMs) {
+    timeoutMs = timeoutMs || 1500;
+    const t0 = performance.now();
+    while (performance.now() - t0 < timeoutMs) {
+      const found = predicate();
+      if (found) return found;
+      await slp(40);
+    }
+    return predicate();
+  }
+
+  // Select a set of nodes by id (graph-side). The visible "marquee"
+  // is just a transient overlay — actual selection goes through
+  // app.canvas.selectNodes for reliability.
+  function selectNodes(nodes) {
+    try {
+      if (app.canvas.deselectAllNodes) app.canvas.deselectAllNodes();
+      if (app.canvas.selectNodes) app.canvas.selectNodes(nodes, false);
+      else if (app.canvas.selectNode) for (const n of nodes) app.canvas.selectNode(n, true);
+      app.canvas.setDirty(true, true);
+    } catch (e) { console.warn('selectNodes failed:', e); }
+  }
+
+  async function drawMarquee(screenBox, dur) {
+    dur = dur || 350;
+    const box = document.createElement('div');
+    Object.assign(box.style, {
+      position:'fixed', left:screenBox.x+'px', top:screenBox.y+'px',
+      width:'0px', height:'0px',
+      border:'1.5px dashed rgba(0,212,255,.85)',
+      background:'rgba(0,212,255,.08)',
+      pointerEvents:'none', zIndex:'999997',
+    });
+    document.body.appendChild(box);
+    const steps = Math.max(8, Math.floor(dur/24));
+    for (let i = 1; i <= steps; i++) {
+      box.style.width  = (screenBox.w * i/steps) + 'px';
+      box.style.height = (screenBox.h * i/steps) + 'px';
+      await slp(dur/steps);
+    }
+    await slp(150);
+    box.style.transition = 'opacity .3s';
+    box.style.opacity = '0';
+    setTimeout(() => box.remove(), 400);
+  }
+
+  // Fit camera to a canvas-space bounding box {x,y,w,h}, leaving paddingPx
+  // viewport pixels of breathing room on each side. Scale is clamped to a
+  // reasonable upper bound so tiny boxes don't zoom in absurdly far.
+  async function fitToBox(box, paddingPx, dur) {
+    if (!box || !isFinite(box.w) || !isFinite(box.h) || box.w <= 0 || box.h <= 0) return;
+    paddingPx = paddingPx == null ? 80 : paddingPx;
+    dur = dur || 500;
+    const el = document.querySelector('canvas.graph-canvas-container')
+            || document.querySelector('canvas#graph-canvas')
+            || document.querySelector('canvas');
+    const rect = el ? el.getBoundingClientRect() : { width: window.innerWidth, height: window.innerHeight };
+    const availW = Math.max(50, rect.width  - paddingPx * 2);
+    const availH = Math.max(50, rect.height - paddingPx * 2);
+    const scale = Math.min(availW / box.w, availH / box.h, 1.4);
+    const cx2 = box.x + box.w / 2, cy2 = box.y + box.h / 2;
+    await cameraTo(cx2, cy2, scale, dur);
+  }
+
+  // Bounding box (canvas-space) covering all currently-placed nodes
+  // (anything with a refs[] entry). Used by the auto-fit toggle.
+  function placedNodesBox() {
+    const placed = [];
+    for (const k in refs) {
+      const n = app.graph.getNodeById(refs[k]);
+      if (n) placed.push(n);
+    }
+    if (!placed.length) return null;
+    return nodesBoundingCanvas(placed);
+  }
+
+  function nodesBoundingCanvas(nodes) {
+    let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+    for (const n of nodes) {
+      x0 = Math.min(x0, n.pos[0]);
+      y0 = Math.min(y0, n.pos[1]);
+      x1 = Math.max(x1, n.pos[0] + (n.size?.[0]||210));
+      y1 = Math.max(y1, n.pos[1] + (n.size?.[1]||80));
+    }
+    return { x:x0, y:y0, w:x1-x0, h:y1-y0 };
+  }
+
+  async function copyPasteSelection() {
+    // Prefer LiteGraph's clipboard API; fall back to key events.
+    let pastedIdsBefore = new Set(app.graph._nodes.map(n => n.id));
+    try {
+      if (app.canvas.copyToClipboard) app.canvas.copyToClipboard();
+      else document.dispatchEvent(new KeyboardEvent('keydown', { key:'c', code:'KeyC', ctrlKey:true, metaKey:true, bubbles:true }));
+      await slp(120);
+      if (app.canvas.pasteFromClipboard) app.canvas.pasteFromClipboard();
+      else document.dispatchEvent(new KeyboardEvent('keydown', { key:'v', code:'KeyV', ctrlKey:true, metaKey:true, bubbles:true }));
+    } catch (e) { console.warn('copy/paste API failed, trying key events:', e); }
+    await slp(200);
+    const newNodes = app.graph._nodes.filter(n => !pastedIdsBefore.has(n.id));
+    return newNodes;
+  }
+
+  async function applyWidgetDiffs(node, diffs) {
+    if (!diffs || !diffs.length || !node.widgets) return;
+    for (const { idx, value } of diffs) {
+      if (idx >= node.widgets.length) continue;
+      const w = node.widgets[idx];
+      if (typeof value === 'string' && isTextWidget(w)) {
+        // Replace current value with target via the typing animation.
+        w.value = '';
+        await typeInWidget(node, idx, value);
+      } else if (w.type === 'combo') {
+        if (w.name === 'control_after_generate') await selectControlAfterGenerate(node, idx, value);
+        else await selectComboViaUI(node, idx, value);
+      } else {
+        await clickWidget(node, idx, value);
+      }
+    }
+  }
+
+  // Pos/size/widgets/properties for a freshly-built fallback node.
+  // Mirrors the original placement block but in helper form so the
+  // humanistic branches can recover without duplicating logic.
+  async function finishCreatedNode(created, nd) {
+    const hasTargetSize = nd.size && typeof nd.size[0] === 'number' && typeof nd.size[1] === 'number';
+    const defaultSize = [created.size[0], created.size[1]];
+    created.pos = [nd.pos[0], nd.pos[1]];
+    if (nd.title !== nd.type) created.title = nd.title;
+    if (USE_NODE_RESIZE && hasTargetSize) {
+      const tgt = [nd.size[0], nd.size[1]];
+      let startSize;
+      if      (RESIZE_START === 'zero')    startSize = [1, 1];
+      else if (RESIZE_START === 'quarter') startSize = [tgt[0]/4, tgt[1]/4];
+      else if (RESIZE_START === 'half')    startSize = [tgt[0]/2, tgt[1]/2];
+      else                                  startSize = defaultSize;
+      app.canvas.setDirty(true,true); await slp(50);
+      await animateResize(created, startSize, tgt, RESIZE_DURATION, RESIZE_EASING);
+    } else {
+      if (hasTargetSize) created.size = [nd.size[0], nd.size[1]];
+      app.canvas.setDirty(true,true); await slp(50);
+    }
+    if (nd.widgets_values && created.widgets) {
+      for (let i = 0; i < Math.min(created.widgets.length, nd.widgets_values.length); i++) {
+        const v = nd.widgets_values[i]; if (v == null) continue;
+        if (typeof v === 'string' && isTextWidget(created.widgets[i])) await typeInWidget(created, i, v);
+        else if (created.widgets[i].type === 'combo') {
+          if (created.widgets[i].name === 'control_after_generate') await selectControlAfterGenerate(created, i, v);
+          else await selectComboViaUI(created, i, v);
+        } else await clickWidget(created, i, v);
+      }
+    }
+    if (nd.properties) Object.assign(created.properties, nd.properties);
+    app.canvas.setDirty(true,true);
+  }
+
+  async function placeSingleClone(nd, info, sx, sy) {
+    const origRefId = refs[info.originalId];
+    const original = origRefId != null ? app.graph.getNodeById(origRefId) : null;
+    if (!original) return null;
+    // Pan/move cursor to the original, click-select it.
+    const ocx = original.pos[0] + (original.size?.[0]||210)/2;
+    const ocy = original.pos[1] + (original.size?.[1]||80)/2;
+    if (USE_CAMERA_PAN) await panTo(ocx, ocy, 400);
+    const op = c2s(ocx, ocy);
+    await moveTo(op.x, op.y, 350);
+    ripple();
+    selectNodes([original]);
+    await slp(200);
+    const pasted = await copyPasteSelection();
+    if (!pasted.length) return null;
+    const created = pasted[0];
+    // Position at target
+    created.pos = [nd.pos[0], nd.pos[1]];
+    if (nd.size) created.size = [nd.size[0], nd.size[1]];
+    if (nd.title && nd.title !== nd.type) created.title = nd.title;
+    app.canvas.setDirty(true, true);
+    await slp(150);
+    // Move cursor to the new spot so the next step starts from there.
+    await moveTo(sx, sy, 400);
+    await applyWidgetDiffs(created, info.widgetDiffs);
+    return created;
+  }
+
+  async function placeClusterClone(triggerNd, info) {
+    // Resolve the original cluster's runtime nodes
+    const originals = info.originalIds
+      .map(id => refs[id] != null ? app.graph.getNodeById(refs[id]) : null)
+      .filter(Boolean);
+    if (originals.length !== info.originalIds.length) return null;
+
+    // Marquee-select the original cluster
+    const cBox = nodesBoundingCanvas(originals);
+    const padCv = 24;
+
+    // Frame both the original cluster AND its destination region together
+    // so the viewer sees the copy and the paste-target in the same shot.
+    const targetCloneNodes = info.cloneIds.map(cid => NODES.find(n => n.id === cid)).filter(Boolean);
+    if (targetCloneNodes.length) {
+      let x0=cBox.x, y0=cBox.y, x1=cBox.x+cBox.w, y1=cBox.y+cBox.h;
+      for (const cn of targetCloneNodes) {
+        x0 = Math.min(x0, cn.pos[0]);
+        y0 = Math.min(y0, cn.pos[1]);
+        x1 = Math.max(x1, cn.pos[0] + (cn.size?.[0]||210));
+        y1 = Math.max(y1, cn.pos[1] + (cn.size?.[1]||80));
+      }
+      await fitToBox({ x:x0, y:y0, w:x1-x0, h:y1-y0 }, 100, 500);
+    } else if (USE_CAMERA_PAN) {
+      await panTo(cBox.x + cBox.w/2, cBox.y + cBox.h/2, 500);
+    }
+    const tl = c2s(cBox.x - padCv, cBox.y - padCv);
+    const br = c2s(cBox.x + cBox.w + padCv, cBox.y + cBox.h + padCv);
+    await moveTo(tl.x, tl.y, 350);
+    await drawMarquee({ x: Math.min(tl.x,br.x), y: Math.min(tl.y,br.y), w: Math.abs(br.x-tl.x), h: Math.abs(br.y-tl.y) }, 400);
+    selectNodes(originals);
+    await slp(200);
+
+    const pasted = await copyPasteSelection();
+    if (pasted.length < originals.length) {
+      console.warn('Cluster paste produced fewer nodes than expected:', pasted.length, '/', originals.length);
+      return null;
+    }
+    // Pair pasted nodes back to original cluster slots by type+order.
+    // Paste typically preserves order; if not, fall back to type-bucket FIFO.
+    const pairing = new Map(); // originalId -> pastedNode
+    const usedPasted = new Set();
+    const pastedByType = new Map();
+    for (const p of pasted) {
+      if (!pastedByType.has(p.type)) pastedByType.set(p.type, []);
+      pastedByType.get(p.type).push(p);
+    }
+    for (let i = 0; i < info.originalIds.length; i++) {
+      const origId = info.originalIds[i];
+      const origRuntime = app.graph.getNodeById(refs[origId]);
+      if (!origRuntime) continue;
+      const bucket = pastedByType.get(origRuntime.type) || [];
+      const pick = bucket.find(p => !usedPasted.has(p.id));
+      if (pick) { pairing.set(origId, pick); usedPasted.add(pick.id); }
+    }
+
+    // Translate the pasted group: align its bbox top-left to the clone's target bbox top-left.
+    const cloneNodes = info.cloneIds.map(cid => NODES.find(n => n.id === cid)).filter(Boolean);
+    if (cloneNodes.length) {
+      let tx0=Infinity,ty0=Infinity;
+      for (const cn of cloneNodes) {
+        tx0 = Math.min(tx0, cn.pos[0]);
+        ty0 = Math.min(ty0, cn.pos[1]);
+      }
+      let px0=Infinity,py0=Infinity;
+      for (const p of pasted) { px0 = Math.min(px0, p.pos[0]); py0 = Math.min(py0, p.pos[1]); }
+      const dx = tx0 - px0, dy = ty0 - py0;
+      for (const p of pasted) { p.pos = [p.pos[0] + dx, p.pos[1] + dy]; }
+    }
+
+    // Snap each paired node to its clone's exact target pos/size, then refs[].
+    for (const [origId, p] of pairing) {
+      const cloneId = info.idMap[origId];
+      if (cloneId == null) continue;
+      const cloneNd = NODES.find(n => n.id === cloneId);
+      if (cloneNd) {
+        p.pos = [cloneNd.pos[0], cloneNd.pos[1]];
+        if (cloneNd.size) p.size = [cloneNd.size[0], cloneNd.size[1]];
+        if (cloneNd.title && cloneNd.title !== cloneNd.type) p.title = cloneNd.title;
+      }
+      refs[cloneId] = p.id;
+    }
+    app.canvas.setDirty(true, true);
+    await slp(200);
+
+    // Apply widget diffs per node, in cluster order.
+    for (const origId of info.originalIds) {
+      const cloneId = info.idMap[origId];
+      const p = cloneId != null ? app.graph.getNodeById(refs[cloneId]) : null;
+      if (!p) continue;
+      const diffs = info.widgetDiffs[origId];
+      if (diffs && diffs.length) {
+        const cx2 = p.pos[0] + (p.size?.[0]||210)/2;
+        const cy2 = p.pos[1] + (p.size?.[1]||80)/2;
+        const sp = c2s(cx2, cy2);
+        await moveTo(sp.x, sp.y, 300);
+        await applyWidgetDiffs(p, diffs);
+      }
+    }
+    return pasted;
+  }
+
   const total=NODES.length+LINKS.length;let step=0;const refs={};const connectedLinks=new Set();
   try{
     if(app.api&&app.api.clearItems){ await app.api.clearItems('history'); await app.api.clearItems('queue'); }
@@ -1747,6 +2232,55 @@
 
   for(const nd of NODES){
     if(window.__replayStop)break;step++;
+
+    // Humanistic-mode shortcuts: skip nodes already placed by an
+    // earlier cluster-paste; trigger cluster paste on the trigger node;
+    // single-clone copy/paste when the original is ready.
+    if (USE_HUMANISTIC && skipPlacement.has(nd.id) && refs[nd.id] != null) {
+      log(step,total,'⤵︎ (already pasted) '+nd.title+' ('+nd.type+')');
+      // Connect any links touching this node before moving on.
+      // (Falls through to the connection block below.)
+    } else if (USE_HUMANISTIC && clusterByTriggerId.has(nd.id)) {
+      const info = clusterByTriggerId.get(nd.id);
+      const ready = info.originalIds.every(id => refs[id] != null);
+      if (ready) {
+        log(step,total,'🧬 Cluster paste → '+info.cloneIds.length+' nodes');
+        recStep('Cluster paste: '+nd.title);
+        const ok = await placeClusterClone(nd, info);
+        if (!ok) {
+          // Fall back to per-node creation.
+          log(step,total,'   ⚠️ Cluster paste failed, rebuilding '+nd.type);
+          const ncx=nd.pos[0]+nd.size[0]/2,ncy=nd.pos[1]+nd.size[1]/2;
+          if(USE_CAMERA_PAN) await panTo(ncx,ncy,500);
+          const sp=c2s(ncx,ncy);await moveTo(sp.x,sp.y,500);await slp(200);
+          const created = await addViaSearchDialog(nd, sp.x, sp.y);
+          if (created) { refs[nd.id] = created.id; await finishCreatedNode(created, nd); }
+        }
+      } else {
+        // Originals aren't all in yet — build this one fresh.
+        const ncx=nd.pos[0]+nd.size[0]/2,ncy=nd.pos[1]+nd.size[1]/2;
+        if(USE_CAMERA_PAN) await panTo(ncx,ncy,500);
+        const sp=c2s(ncx,ncy);await moveTo(sp.x,sp.y,500);await slp(200);
+        log(step,total,'➕ '+nd.title+' ('+nd.type+')');
+        const created = await addViaSearchDialog(nd, sp.x, sp.y);
+        if (created) { refs[nd.id] = created.id; await finishCreatedNode(created, nd); }
+      }
+    } else if (USE_HUMANISTIC && cloneByCloneId.has(nd.id) && refs[cloneByCloneId.get(nd.id).originalId] != null) {
+      const info = cloneByCloneId.get(nd.id);
+      log(step,total,'📋 Copy-paste clone of '+info.originalId+' → '+nd.title);
+      recStep('Clone: '+nd.title);
+      const ncx=nd.pos[0]+nd.size[0]/2,ncy=nd.pos[1]+nd.size[1]/2;
+      const sp=c2s(ncx,ncy);
+      const created = await placeSingleClone(nd, info, sp.x, sp.y);
+      if (created) { refs[nd.id] = created.id; if (nd.properties) Object.assign(created.properties, nd.properties); }
+      else {
+        log(step,total,'   ⚠️ Clone failed, rebuilding '+nd.type);
+        if(USE_CAMERA_PAN) await panTo(ncx,ncy,500);
+        await moveTo(sp.x,sp.y,500);await slp(200);
+        const fresh = await addViaSearchDialog(nd, sp.x, sp.y);
+        if (fresh) { refs[nd.id] = fresh.id; await finishCreatedNode(fresh, nd); }
+      }
+    } else {
     log(step,total,'➕ '+nd.title+' ('+nd.type+')');
     recStep('Node: '+nd.title);
     const ncx=nd.pos[0]+nd.size[0]/2,ncy=nd.pos[1]+nd.size[1]/2;
@@ -1801,6 +2335,7 @@
       if(nd.properties)Object.assign(created.properties,nd.properties);
       refs[nd.id]=created.id;app.canvas.setDirty(true,true);
     }
+    }
     label(nd.title, (DLY + 500) * 0.5, false);
     let stepDly = DLY * 0.5;
 
@@ -1825,6 +2360,13 @@
       if(connectedLinks.has(li))continue;
       const lk=LINKS[li];
       if(refs[lk.srcId]==null||refs[lk.tgtId]==null)continue;
+      // Cluster-internal wires came along with paste — mark them
+      // connected and skip the visible drag, but only after the
+      // target cluster has actually been pasted (refs set).
+      if (USE_HUMANISTIC && internalLinkSet.has(li)) {
+        connectedLinks.add(li);
+        continue;
+      }
       connectedLinks.add(li);step++;
       const sn=app.graph.getNodeById(refs[lk.srcId]),tn=app.graph.getNodeById(refs[lk.tgtId]);
       if(!sn||!tn)continue;
@@ -1850,6 +2392,12 @@
       sn.connect(srcSlotIdx,tn,tgtSlotIdx);app.canvas.setDirty(true,true);await slp(DLY*0.3);
     }
     if (USE_CAMERA_ZOOM && USE_CAMERA_PAN) await cameraTo(nd.pos[0]+nd.size[0]/2, nd.pos[1]+nd.size[1]/2, 1.0, 500); // zoom back out after each node/link set
+    // Auto-fit: re-frame to all placed nodes so the graph never drifts off-screen.
+    // Runs after the per-node camera-zoom reset above so it has the last word.
+    if (USE_AUTO_FIT) {
+      const box = placedNodesBox();
+      if (box) await fitToBox(box, 100, 450);
+    }
     await slp(stepDly * 0.5);
   }
 
@@ -3018,6 +3566,18 @@
     const comboUIToggle = document.getElementById('combo-ui-toggle');
     comboUIToggle.addEventListener('change', e => {
       useComboUI = e.target.checked;
+      regenerateScripts();
+    });
+
+    const humanisticToggle = document.getElementById('humanistic-toggle');
+    humanisticToggle.addEventListener('change', e => {
+      useHumanistic = e.target.checked;
+      regenerateScripts();
+    });
+
+    const autoFitToggle = document.getElementById('autofit-toggle');
+    autoFitToggle.addEventListener('change', e => {
+      useAutoFit = e.target.checked;
       regenerateScripts();
     });
 
