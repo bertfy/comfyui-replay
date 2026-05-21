@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ComfyUI Replay</title>
+<style>
+  :root { --bg:#0e0f12; --fg:#e7ebf3; --muted:#9aa3b2; --accent:#5cd5fd; --ok:#34d399; --warn:#fbbf24; --err:#ef4444; --line:#22262e; }
+  html, body { background: var(--bg); color: var(--fg); margin: 0; padding: 0; font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  .wrap { padding: 14px; display: flex; flex-direction: column; gap: 12px; min-height: 100vh; box-sizing: border-box; }
+  h1 { font-size: 14px; font-weight: 600; margin: 0; color: var(--fg); }
+  h1 .sub { color: var(--muted); font-weight: 400; margin-left: 6px; font-size: 11px; }
+  .card { background: #15171c; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  label.row { display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: pointer; padding: 4px 0; }
+  label.row input { accent-color: var(--accent); }
+  .row-desc { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  button { background: #1c2129; color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 7px 12px; cursor: pointer; font: inherit; }
+  button:hover:not(:disabled) { border-color: #3a4150; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.primary { background: var(--accent); color: #0a0c10; border-color: var(--accent); font-weight: 600; }
+  button.primary:hover:not(:disabled) { filter: brightness(1.1); }
+  #log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--muted); height: 180px; overflow-y: auto; background: #0a0c10; border: 1px solid var(--line); border-radius: 6px; padding: 8px; white-space: pre-wrap; }
+  #log .ok   { color: var(--ok); }
+  #log .warn { color: var(--warn); }
+  #log .err  { color: var(--err); }
+  #log .info { color: var(--accent); }
+  #status-tab { font-size: 11px; color: var(--muted); }
+  #status-tab b { color: var(--fg); }
+  .footer { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div style="display:flex; align-items:baseline; justify-content:space-between;">
+    <h1>ComfyUI Replay <span class="sub">extension v0.1</span></h1>
+  </div>
+
+  <div class="card">
+    <div id="status-tab">Comfy tab: <b id="comfy-tab-label">checking…</b></div>
+  </div>
+
+  <div class="card">
+    <div style="font-weight:600; margin-bottom:6px;">1. Workflow</div>
+    <button id="btn-example">Use Example 1 (txt2img)</button>
+    <div class="row-desc">Drop-workflow + AI Script are baked in for v0.1 — just one button.</div>
+  </div>
+
+  <div class="card">
+    <div style="font-weight:600; margin-bottom:6px;">2. Options</div>
+    <label class="row"><span>AI Voice Over Timing</span><input type="checkbox" id="opt-vo" checked></label>
+    <div class="row-desc">Each beat holds for the VO clip's real duration.</div>
+
+    <label class="row"><span>VO source</span>
+      <select id="opt-vo-source" style="background:#1c2129;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px 6px;">
+        <option value="bundled" selected>Bundled MP3s (Example 1 only)</option>
+        <option value="elevenlabs">ElevenLabs (live)</option>
+      </select>
+    </label>
+    <div class="row-desc">Bundled = zero-network demo. ElevenLabs = real TTS, cached in IndexedDB after first run.</div>
+
+    <label class="row"><span>Record Video</span><input type="checkbox" id="opt-rec" checked></label>
+    <div class="row-desc">getDisplayMedia(this tab) → MediaRecorder → MP4. You'll be prompted to share the Comfy tab.</div>
+  </div>
+
+  <details class="card" id="settings-card">
+    <summary style="cursor:pointer; font-weight:600; user-select:none;">⚙ ElevenLabs Settings</summary>
+    <div style="display:flex; flex-direction:column; gap:8px; margin-top:10px;">
+      <label style="display:flex; flex-direction:column; gap:4px;">
+        <span style="font-size:11px; color:var(--muted);">API Key</span>
+        <input id="el-key" type="password" placeholder="sk_..." style="background:#0a0c10;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:6px;font-family:inherit;">
+      </label>
+      <label style="display:flex; flex-direction:column; gap:4px;">
+        <span style="font-size:11px; color:var(--muted);">Voice ID <span id="el-voice-name" style="color:var(--accent);"></span></span>
+        <div style="display:flex; gap:6px;">
+          <input id="el-voice" type="text" placeholder="EXAVITQu4vr4xnSDxMaL" style="background:#0a0c10;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:6px;font-family:inherit;flex:1;">
+          <button id="el-list-voices" type="button">List Voices</button>
+        </div>
+      </label>
+      <label style="display:flex; flex-direction:column; gap:4px;">
+        <span style="font-size:11px; color:var(--muted);">Model</span>
+        <input id="el-model" type="text" value="eleven_turbo_v2_5" style="background:#0a0c10;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:6px;font-family:inherit;">
+      </label>
+      <div style="display:flex; gap:6px;">
+        <button id="el-save" type="button" class="primary" style="flex:1;">Save Settings</button>
+        <button id="el-clear-cache" type="button">Clear Cache</button>
+      </div>
+      <div id="el-status" style="font-size:11px; color:var(--muted);"></div>
+    </div>
+  </details>
+
+  <div>
+    <button id="btn-record" class="primary" style="width:100%; padding:10px;">▶ Record Replay</button>
+  </div>
+
+  <div class="card">
+    <div style="font-weight:600; margin-bottom:6px;">Log</div>
+    <div id="log"></div>
+  </div>
+
+  <div class="footer">Internal dev build · v0.1 · single-instance guard active</div>
+</div>
+<script src="panel.js" type="module"></script>
+</body>
+</html>
