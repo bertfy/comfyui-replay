@@ -4,3 +4,6 @@ config.local.js
 recordings/
 *.webm
 *.mp4
+.env
+.env.local
+tts-cache/

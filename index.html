@@ -1263,7 +1263,23 @@
   const RESIZE_EASING = '${resizeEasing}';
   const RESIZE_START = '${resizeStart}';
   const SHOW_VO_CAPTIONS = ${showVOCaptions};
+  // ── Single-instance guard ──────────────────────────────────────────────────
+  // Re-pasting the script while a previous run is in flight would launch a
+  // second IIFE in parallel — overlapping audio, doubled mouse cursor, etc.
+  // We signal the prior run to stop, wait for it to release the flag, then
+  // claim ownership for this run.
+  if (window.__replayRunning) {
+    console.warn('%c⏹ Stopping previous replay before starting a new one…','color:#fcd34d;font-weight:bold;');
+    window.__replayStop = true;
+    const t0 = Date.now();
+    while (window.__replayRunning && Date.now() - t0 < 5000) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+    // Best-effort: also clean up any leftover audio elements from the prior run.
+    document.querySelectorAll('audio[data-comfy-vo]').forEach(el => { try { el.pause(); el.remove(); } catch(_){} });
+  }
   window.__replayStop = false;
+  window.__replayRunning = true;
 
   document.getElementById('__rc')?.remove();
   document.getElementById('__ro')?.remove();
@@ -1316,7 +1332,97 @@
     dbg.scrollTop = dbg.scrollHeight;
   }
 
+  // ── VO (voice-over) infrastructure ──────────────────────────────────────────
+  // When USE_AI_TIMING is on AND NARRATIONS exist, the replay:
+  //   1. waits for Comfy to be ready (no login overlay, app.graph live)
+  //   2. pre-fetches every narration's MP3 from the local record-server /tts
+  //   3. paces each beat to Math.max(DLY, voClipDurationMs)
+  //   4. plays the audio at each beat
+  //   5. tags step events with audioKey so the server muxes audio at recorded offsets
+  const VO_SERVER = 'http://localhost:3001';
+  const VO_AUDIO = {}; // id -> { audioKey, audioUrl, durationMs }
+  let voReady = false; // true once prefetchVO has populated VO_AUDIO
+
+  // Wait for ComfyUI to be interactive. Gates beat zero so a login overlay
+  // or GPU cold-start doesn't ruin the first 30s of the recording.
+  async function waitForComfyReady(timeoutMs = 120000) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      if (window.__replayStop) return false;
+      const hasApp   = !!(window.app && window.app.graph && window.app.canvas);
+      const hasNodes = hasApp && Array.isArray(window.app.graph._nodes);
+      // Heuristic: look for any visible "loading" / "allocating" overlay text.
+      const overlay = document.querySelector('.p-dialog-mask, .loading-overlay, [role="progressbar"]');
+      const overlayVisible = !!(overlay && overlay.offsetParent !== null);
+      if (hasApp && hasNodes && !overlayVisible) {
+        // Extra sanity: probe /object_info; Cloud serves it on the same origin.
+        try {
+          const r = await fetch('/object_info', { method: 'GET' });
+          if (r.ok) { logD('Comfy ready ✓','#34d399'); return true; }
+        } catch (_) { /* fall through */ }
+      }
+      await new Promise(r => setTimeout(r, 250));
+    }
+    logD('waitForComfyReady timeout — proceeding anyway','#fca5a5');
+    return false;
+  }
+
+  // POST each narration text to /tts; populate VO_AUDIO with audioKey + duration.
+  // Runs in parallel for speed. Cache hits return instantly.
+  async function prefetchVO() {
+    if (!NARRATIONS) return;
+    const entries = Object.entries(NARRATIONS).filter(([k,v]) => typeof v === 'string' && v.trim().length > 0);
+    logD(\`Prefetching VO for \${entries.length} beats…\`, '#fcd34d');
+    const results = await Promise.all(entries.map(async ([id, text]) => {
+      try {
+        const r = await fetch(VO_SERVER + '/tts', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const j = await r.json();
+        VO_AUDIO[id] = { audioKey: j.key, audioUrl: VO_SERVER + j.audioUrl, durationMs: j.durationMs };
+        return true;
+      } catch (e) {
+        console.warn('VO fetch failed for', id, e.message);
+        return false;
+      }
+    }));
+    const ok = results.filter(Boolean).length;
+    logD(\`VO ready: \${ok}/\${entries.length} clips\`, ok === entries.length ? '#34d399' : '#fca5a5');
+    voReady = ok > 0;
+  }
+
+  // Play a beat's audio (fire-and-forget; does not block replay timing).
+  // Returns the durationMs so the caller can slp() for at least that long.
+  function playVO(id) {
+    const v = VO_AUDIO[id];
+    if (!v) return 0;
+    try {
+      const a = new Audio(v.audioUrl);
+      a.preload = 'auto';
+      a.dataset.comfyVo = id;                       // for cleanup by single-instance guard
+      a.addEventListener('ended', () => { try { a.remove(); } catch(_){} });
+      // Attach to DOM so we can find and stop it; also so its lifetime
+      // doesn't depend on garbage collection alone.
+      document.body.appendChild(a);
+      a.play().catch(e => console.warn('VO playback blocked:', e.message));
+    } catch (e) { /* ignore */ }
+    return v.durationMs;
+  }
+
+  // ── Recording: gate WS start on Comfy readiness + VO prefetch ───────────────
   let recWs=null,recStartTime=0;
+
+  // beat-zero gate — only when we have VO to align or recording to capture
+  if ((USE_AI_TIMING && NARRATIONS) || RECORD_VIDEO) {
+    await waitForComfyReady();
+  }
+  if (USE_AI_TIMING && NARRATIONS) {
+    await prefetchVO();
+  }
+
   if (RECORD_VIDEO) {
     logD('RECORD_VIDEO is enabled. Connecting to record server...', '#fca5a5');
     try {
@@ -1343,10 +1449,19 @@
       recWs = null;
     }
   }
-  function recStep(name) {
-    if(recWs && recWs.readyState === 1) {
-      recWs.send(JSON.stringify({type:'step', name:name, timeMs:Date.now()-recStartTime}));
-    }
+  // Loud warning when VO is on but recording isn't — the user will hear
+  // audio in-browser but no file will land on Desktop. This is the most
+  // common mis-configuration.
+  if (USE_AI_TIMING && NARRATIONS && !RECORD_VIDEO) {
+    console.warn('%c⚠️ AI Voice Over Timing is ON but Record Video is OFF.\\n   You\\'ll hear narration but no video file will be saved.\\n   Toggle "Record Video" in the generator UI, copy the script again, re-paste.','color:#fbbf24;font-size:13px;font-weight:bold;');
+  }
+  // recStep takes optional voId — if present and VO_AUDIO has the entry,
+  // server gets audioKey on the step event and muxes that clip at timeMs.
+  function recStep(name, voId) {
+    if(recWs && recWs.readyState !== 1) return;
+    const evt = { type:'step', name:name, timeMs:Date.now()-recStartTime };
+    if (voId && VO_AUDIO[voId]) evt.audioKey = VO_AUDIO[voId].audioKey;
+    if (recWs) recWs.send(JSON.stringify(evt));
   }
   function c2s(cx2,cy2){
     const el=document.querySelector('canvas.graph-canvas-container')||document.querySelector('canvas#graph-canvas')||document.querySelector('canvas');
@@ -2339,20 +2454,27 @@
     label(nd.title, (DLY + 500) * 0.5, false);
     let stepDly = DLY * 0.5;
 
-    // AI Narration Timing — only apply speech-based delays when USE_AI_TIMING is on
+    // AI Narration Timing — when USE_AI_TIMING is on, hold each beat for the
+    // REAL VO clip duration (measured by ffprobe server-side, prefetched into
+    // VO_AUDIO). Falls back to word-count estimate if VO prefetch failed.
     if (USE_AI_TIMING && NARRATIONS && NARRATIONS[nd.id]) {
       const msg = NARRATIONS[nd.id];
-      const wordCount = msg.split(' ').length;
-      const speechTime = (wordCount / 2.5) * 1000; // Average 150 WPM
+      const vo  = VO_AUDIO[nd.id];
+      const speechTime = vo
+        ? Math.max(DLY, vo.durationMs)                     // real clip duration
+        : (msg.split(' ').length / 2.5) * 1000;            // fallback: 150 WPM estimate
       label(msg, speechTime + 1000, true);
-      // DLY acts as padding: pause DLY before narration, wait speechTime, then DLY after
-      await slp(DLY);
+      // Tag this beat so the server muxes its audio at the current recording offset.
+      // Audio starts immediately — no pre-padding — so it tracks the action.
+      recStep('Beat: '+nd.title, nd.id);
+      if (vo) playVO(nd.id);
       stepDly = speechTime;
       console.log('%c🎙️ Narration: ' + msg, 'color:#fcd34d;');
     }
 
     await slp(stepDly);
-    if (USE_AI_TIMING && NARRATIONS && NARRATIONS[nd.id]) await slp(DLY); // post-narration padding
+    // Tiny breather between beats (was DLY = 1000ms; was creating dead air)
+    if (USE_AI_TIMING && NARRATIONS && NARRATIONS[nd.id]) await slp(150);
 
     // Connect any links where both nodes now exist
     for(let li=0;li<LINKS.length;li++){
@@ -2376,7 +2498,11 @@
       const srcSlotIdx = resolveSlot(sn, false, lk.srcSlot, lk.srcSlotName);
       const tgtSlotIdx = resolveSlot(tn, true,  lk.tgtSlot, lk.tgtSlotName);
       log(step,total, '🔗 '+(sn.title||sn.type)+'['+srcSlotIdx+'] → '+(tn.title||tn.type)+'['+tgtSlotIdx+']');
-      recStep('Link: '+sn.title+' -> '+tn.title);
+      // Per-link VO id matches the key shape used in NARRATIONS / preview UI.
+      const linkVoId = 'link_'+lk.srcId+'_'+lk.srcSlot+'_'+lk.tgtId+'_'+lk.tgtSlot;
+      const linkVo   = (USE_AI_TIMING && VO_AUDIO[linkVoId]) || null;
+      recStep('Link: '+sn.title+' -> '+tn.title, linkVoId);
+      if (linkVo) playVO(linkVoId);
       const midX=(sn.pos[0]+tn.pos[0])/2,midY=(sn.pos[1]+tn.pos[1])/2;
       if(USE_CAMERA_PAN) await panTo(midX,midY,400);
       const sp2=new Float32Array(2),tp2=new Float32Array(2);
@@ -2389,7 +2515,9 @@
       const SLOT_Y_FIX = (typeof LiteGraph !== 'undefined' ? LiteGraph.NODE_SLOT_HEIGHT : 20) / 2;
       const ss=c2s(sp2[0],sp2[1]+SLOT_Y_FIX),ts=c2s(tp2[0],tp2[1]+SLOT_Y_FIX);
       await dragTo(ss.x,ss.y,ts.x,ts.y,600);await slp(50);
-      sn.connect(srcSlotIdx,tn,tgtSlotIdx);app.canvas.setDirty(true,true);await slp(DLY*0.3);
+      sn.connect(srcSlotIdx,tn,tgtSlotIdx);app.canvas.setDirty(true,true);
+      // Hold for VO duration if present, else the original short delay.
+      await slp(linkVo ? Math.max(DLY, linkVo.durationMs) : DLY*0.3);
     }
     if (USE_CAMERA_ZOOM && USE_CAMERA_PAN) await cameraTo(nd.pos[0]+nd.size[0]/2, nd.pos[1]+nd.size[1]/2, 1.0, 500); // zoom back out after each node/link set
     // Auto-fit: re-frame to all placed nodes so the graph never drifts off-screen.
@@ -2480,6 +2608,9 @@
     });
     recWs.close();
   }
+
+  // Release single-instance lock so a fresh paste can run immediately.
+  window.__replayRunning = false;
 })();
       `.trim();
     }
