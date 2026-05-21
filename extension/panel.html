@@ -598,6 +598,16 @@
   </div>
 </div>
 
+<div class="pane-section" style="padding:0 12px;">
+  <div class="btn-row">
+    <button id="btn-record" class="primary" disabled>▶ Record Replay</button>
+  </div>
+  <div class="btn-row" style="gap:4px;">
+    <button id="btn-stop" disabled style="flex:1;">■ Stop</button>
+    <button id="btn-reload" title="Re-run Example setup" style="flex:1;">↻ Reload Example</button>
+  </div>
+</div>
+
 <div class="tabs-wrap">
   <div class="tabs" role="tablist">
     <button class="tab-btn active" id="tab-btn-record" data-tab="record" role="tab" aria-selected="true">
@@ -611,15 +621,6 @@
 
 <!-- ── Record pane ────────────────────────────────────────────────── -->
 <section class="tab-pane active" id="pane-record" role="tabpanel" aria-labelledby="tab-btn-record">
-  <div class="pane-section">
-    <div class="btn-row">
-      <button id="btn-record" class="primary" disabled>▶ Record Replay</button>
-    </div>
-    <div class="btn-row" style="gap:4px;">
-      <button id="btn-stop" disabled style="flex:1;">■ Stop</button>
-      <button id="btn-reload" title="Re-run Example setup" style="flex:1;">↻ Reload Example</button>
-    </div>
-  </div>
 
   <!-- Workflow indicator + drop zone -->
   <div class="pane-section">
