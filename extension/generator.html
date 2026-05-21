@@ -1,0 +1,3952 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ComfyUI Replay Generator</title>
+
+  <!-- ── Extension sandbox shims ──────────────────────────────────────
+       Sandboxed iframes run with origin=null, so localStorage and
+       sessionStorage throw SecurityError on access. Without this shim
+       the main script halts on its first localStorage.getItem() and
+       window.loadExampleWorkflow never gets defined. The shim is
+       in-memory only — settings won't persist across reloads — but
+       that's fine for use inside the extension (real settings live in
+       chrome.storage at the panel level). -->
+  <script>
+    (function () {
+      function makeShim() {
+        const m = new Map();
+        return {
+          getItem(k)        { return m.has(k) ? m.get(k) : null; },
+          setItem(k, v)     { m.set(String(k), String(v)); },
+          removeItem(k)     { m.delete(String(k)); },
+          clear()           { m.clear(); },
+          key(i)            { return [...m.keys()][i] ?? null; },
+          get length()      { return m.size; },
+        };
+      }
+      function safeReplace(name) {
+        try { window[name].getItem('__probe__'); }
+        catch (_) {
+          try { Object.defineProperty(window, name, { value: makeShim(), configurable: true, writable: false }); } catch(_){}
+        }
+      }
+      safeReplace('localStorage');
+      safeReplace('sessionStorage');
+    })();
+  </script>
+
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0d0f14;
+      --surface: #161921;
+      --surface2: #1e2230;
+      --border: #2a2f3e;
+      --accent: #00d4ff;
+      --accent2: #7c3aed;
+      --green: #00ff88;
+      --text: #e2e8f0;
+      --muted: #64748b;
+      --radius: 14px;
+    }
+
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      margin: 0; padding: 0;
+    }
+
+    .app-layout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      min-height: 100vh;
+      max-width: 1400px;
+      margin: 0 auto;
+      gap: 0;
+    }
+    .app-left {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 30px 80px;
+      overflow-y: auto;
+    }
+    .app-right {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+      border-left: 1px solid var(--border);
+      background: var(--surface);
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
+    .app-right-empty {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      color: var(--muted);
+      font-size: 14px;
+      text-align: center;
+      padding: 40px;
+    }
+    .app-right-empty .empty-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+      display: block;
+      opacity: 0.4;
+    }
+
+    @media (max-width: 900px) {
+      .app-layout {
+        grid-template-columns: 1fr;
+      }
+      .app-right {
+        position: relative;
+        height: auto;
+        border-left: none;
+        border-top: 1px solid var(--border);
+      }
+    }
+
+    /* ── Header ── */
+    header {
+      text-align: center;
+      margin-bottom: 40px;
+    }
+    .logo {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .logo-icon {
+      width: 40px; height: 40px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 20px;
+    }
+    h1 { font-size: 28px; font-weight: 700; letter-spacing: -0.5px; }
+    h1 span { color: var(--accent); }
+    .subtitle { color: var(--muted); font-size: 15px; margin-top: 6px; }
+
+    /* ── Drop Zone ── */
+    .drop-zone {
+      width: 100%;
+      max-width: 640px;
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 60px 40px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      position: relative;
+      background: var(--surface);
+    }
+    .drop-zone:hover, .drop-zone.drag-over {
+      border-color: var(--accent);
+      background: rgba(0, 212, 255, 0.04);
+      box-shadow: 0 0 0 4px rgba(0, 212, 255, 0.08);
+    }
+    .drop-zone.drag-over { transform: scale(1.01); }
+    .drop-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+      display: block;
+      transition: transform 0.2s;
+    }
+    .drop-zone:hover .drop-icon, .drop-zone.drag-over .drop-icon { transform: scale(1.1) translateY(-4px); }
+    .drop-title {
+      font-size: 18px; font-weight: 600; margin-bottom: 8px;
+    }
+    .drop-sub { color: var(--muted); font-size: 14px; }
+    .drop-sub strong { color: var(--accent); }
+
+    #file-input { display: none; }
+
+    /* ── Options ── */
+    .options {
+      width: 100%;
+      max-width: 640px;
+      margin-top: 20px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+    }
+    .options-title {
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .options-title ~ .options-title {
+      margin-top: 28px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border);
+    }
+    details.options-section { margin-top: 0; }
+    .option-row:has(+ details.options-section) { border-bottom: none; }
+    details.options-section > summary {
+      font-size: 13px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--muted); padding: 16px 0 12px;
+      cursor: pointer; list-style: none; display: flex; align-items: center;
+      justify-content: space-between; user-select: none; margin-top: 12px;
+    }
+    details.options-section > summary::-webkit-details-marker { display: none; }
+    details.options-section > summary::after { content: '▸'; font-size: 12px; transition: transform 0.2s; }
+    details.options-section[open] > summary::after { transform: rotate(90deg); }
+    details.options-section > .options-body { padding-bottom: 4px; }
+    .btn-example {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.05);
+      color: var(--muted);
+      cursor: pointer;
+      text-transform: none;
+      letter-spacing: 0;
+      transition: background 0.15s, color 0.15s;
+    }
+    .btn-example:hover { background: rgba(255,255,255,0.1); color: var(--text); }
+    .option-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .option-row:last-child { border-bottom: none; }
+    .option-label { font-size: 14px; font-weight: 500; }
+    .option-desc { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .option-tip { margin-left: 4px; cursor: help; position: relative; display: inline-flex; align-items: center; vertical-align: baseline; }
+    .option-tip svg { width: 13px; height: 13px; stroke: var(--muted); opacity: 0.5; transition: opacity 0.2s; vertical-align: -1px; }
+    .option-tip:hover svg { opacity: 1; stroke: var(--accent); }
+    .option-tip::after { content: attr(data-tip); position: absolute; bottom: 130%; left: 50%; transform: translateX(-50%); background: #1a1a2e; color: #e2e8f0; font-size: 11px; padding: 6px 10px; border-radius: 6px; white-space: nowrap; pointer-events: none; opacity: 0; transition: opacity 0.2s; border: 1px solid #334155; box-shadow: 0 4px 12px rgba(0,0,0,0.4); z-index: 10; }
+    .option-tip:hover::after { opacity: 1; }
+
+    input[type="number"], input[type="range"], input[type="password"] {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 6px 12px;
+      font-size: 14px;
+      font-family: 'JetBrains Mono', monospace;
+      outline: none;
+    }
+    input[type="number"] { width: 100px; }
+    input[type="password"] { width: 100%; max-width: 300px; }
+    input[type="number"]:focus, input[type="password"]:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.1);
+    }
+    input[type="range"] { padding: 0; width: 120px; accent-color: var(--accent); }
+
+    /* ── Image Zone ── */
+    .image-zone {
+      width: 100%; max-width: 640px;
+      margin-top: 20px; margin-bottom: 20px;
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 30px 20px;
+      text-align: center; cursor: pointer;
+      background: var(--surface);
+      transition: all 0.2s ease;
+      position: relative;
+      overflow: hidden;
+    }
+    .image-zone:hover, .image-zone.drag-over { border-color: var(--accent); background: rgba(0, 212, 255, 0.04); }
+    #image-preview {
+      display: none; max-width: 100%; max-height: 250px;
+      margin: 15px auto 0; border-radius: 8px;
+      border: 1px solid var(--border);
+      box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+    }
+    .clear-image {
+      position: absolute; top: 10px; right: 10px;
+      background: rgba(239,68,68,0.2); color: #f87171;
+      border: 1px solid rgba(239,68,68,0.3);
+      padding: 4px 8px; border-radius: 6px; font-size: 11px;
+      cursor: pointer; display: none;
+    }
+    .image-zone:hover .clear-image { display: block; }
+
+    /* ── Toggle Switch ── */
+    .switch {
+      position: relative; display: inline-block;
+      width: 36px; height: 18px;
+    }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-color: var(--border);
+      transition: .3s; border-radius: 20px;
+    }
+    .slider:before {
+      position: absolute; content: "";
+      height: 12px; width: 12px; left: 3px; bottom: 3px;
+      background-color: white; transition: .3s; border-radius: 50%;
+    }
+    input:checked + .slider { background-color: var(--accent); }
+    input:checked + .slider:before { transform: translateX(18px); }
+
+    .ai-btn {
+      background: linear-gradient(135deg, var(--accent2), #5b21b6);
+      color: #fff; border: none; padding: 8px 16px;
+      border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600;
+      transition: all 0.2s; margin-top: 10px; display: inline-flex; align-items: center; gap: 8px;
+    }
+    .ai-btn:hover { filter: brightness(1.2); transform: translateY(-1px); }
+    .ai-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .ai-btn.loading { animation: pulse 1.5s infinite ease-in-out; }
+    @keyframes pulse { 0% { opacity: 0.6; } 50% { opacity: 1; } 100% { opacity: 0.6; } }
+
+    .option-meta { display: flex; flex-direction: column; }
+
+    /* ── Queue ── */
+    .queue {
+      width: 100%;
+      max-width: 640px;
+      margin-top: 20px;
+    }
+    .queue-title {
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 12px;
+    }
+
+    .file-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 20px;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      animation: slideIn 0.25s ease;
+    }
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .file-icon { font-size: 24px; flex-shrink: 0; }
+    .file-info { flex: 1; min-width: 0; }
+    .file-name {
+      font-size: 14px; font-weight: 600;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .file-meta { font-size: 12px; color: var(--muted); margin-top: 3px; }
+    .file-status {
+      font-size: 12px; font-weight: 500; padding: 4px 10px;
+      border-radius: 20px; flex-shrink: 0;
+    }
+    .status-processing { background: rgba(252,211,77,0.12); color: #fcd34d; }
+    .status-done { background: rgba(0,255,136,0.1); color: var(--green); }
+    .status-error { background: rgba(239,68,68,0.12); color: #f87171; }
+
+    .file-actions { display: flex; gap: 8px; flex-shrink: 0; }
+
+    button.btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 7px 14px; border-radius: 8px;
+      font-size: 13px; font-weight: 500;
+      cursor: pointer; border: none;
+      transition: all 0.15s ease;
+    }
+    .btn-copy {
+      background: linear-gradient(135deg, var(--accent), #0099bb);
+      color: #000;
+    }
+    .btn-copy:hover { filter: brightness(1.1); transform: translateY(-1px); }
+    .btn-copy.copied { background: linear-gradient(135deg, var(--green), #00cc66); }
+    .btn-download {
+      background: var(--surface2);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-download:hover { border-color: var(--accent); color: var(--accent); }
+    .btn-remove {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      padding: 7px 10px;
+    }
+    .btn-remove:hover { color: #f87171; border-color: #f87171; }
+
+    /* ── Instructions ── */
+    .instructions {
+      width: 100%;
+      max-width: 640px;
+      margin-top: 24px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+    }
+    .instructions-title {
+      font-size: 13px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--muted); margin-bottom: 14px;
+    }
+    .step {
+      display: flex; align-items: flex-start; gap: 12px;
+      margin-bottom: 12px;
+    }
+    .step:last-child { margin-bottom: 0; }
+    .step-num {
+      width: 24px; height: 24px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      color: #000; font-size: 12px; font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0; margin-top: 1px;
+    }
+    .step-text { font-size: 14px; line-height: 1.5; }
+    .step-text code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      background: var(--surface2);
+      padding: 2px 6px; border-radius: 4px;
+      color: var(--accent);
+    }
+
+    /* ── Empty state ── */
+    .empty-queue {
+      text-align: center; padding: 24px;
+      color: var(--muted); font-size: 14px;
+    }
+
+    /* ── Toast ── */
+    .toast {
+      position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+      background: var(--surface2); border: 1px solid var(--accent);
+      color: var(--text); padding: 12px 20px; border-radius: 10px;
+      font-size: 14px; font-weight: 500;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+      animation: toastIn 0.25s ease; z-index: 99;
+    }
+    @keyframes toastIn {
+      from { opacity: 0; transform: translate(-50%, 10px); }
+      to   { opacity: 1; transform: translate(-50%, 0); }
+    }
+  </style>
+  <style>
+    /* ── Select ── */
+    select {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 6px 12px;
+      font-size: 14px;
+      font-family: 'Inter', system-ui, sans-serif;
+      outline: none; cursor: pointer;
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2364748b' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 10px center;
+      padding-right: 30px;
+    }
+    select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.1); }
+
+    .cors-note {
+      font-size: 11px; color: var(--muted);
+      padding: 6px 10px; margin-top: 6px;
+      background: rgba(252,211,77,0.06);
+      border: 1px solid rgba(252,211,77,0.15);
+      border-radius: 6px; display: none;
+    }
+    .ai-config-auto {
+      font-size: 12px; color: var(--green);
+      background: rgba(0,255,136,0.06);
+      border: 1px solid rgba(0,255,136,0.15);
+      padding: 8px 12px; border-radius: 8px;
+      margin-bottom: 10px; display: none;
+    }
+
+    /* ── Script Preview Panel ── */
+    .preview-panel {
+      display: none;
+      margin-top: 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      max-height: 500px;
+      overflow-y: auto;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
+    .preview-panel.open { display: block; animation: slideIn 0.2s ease; }
+    .preview-header {
+      display: flex; gap: 12px; padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      border-radius: 10px 10px 0 0;
+      position: sticky; top: 0; z-index: 2;
+    }
+    .preview-header-col {
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--muted);
+    }
+    .preview-header-col.col-step { flex: 0 0 35%; }
+    .preview-header-col.col-script { flex: 1; }
+    .preview-header-col.col-time { flex: 0 0 90px; text-align: right; padding-right: 32px; }
+    .step-dur {
+      font-size: 10px;
+      color: var(--muted);
+      opacity: 0.5;
+      margin-top: 2px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .preview-row {
+      display: flex; gap: 12px; padding: 10px 16px;
+      border-bottom: 1px solid rgba(255,255,255,0.03);
+      align-items: flex-start;
+      transition: background 0.15s;
+      position: relative;
+    }
+    .preview-row:hover { background: rgba(255,255,255,0.02); }
+    .delete-step-btn {
+      position: absolute;
+      right: 12px;
+      top: 10px;
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      width: 26px; height: 26px;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer;
+      opacity: 1;
+      transition: color 0.2s;
+      z-index: 1;
+    }
+    .preview-row:hover .delete-step-btn {
+      color: var(--text);
+    }
+    .delete-step-btn:hover {
+      color: #ef4444;
+    }
+    /* default styling for .preview-row.node-row is inherited */
+    .preview-row.link-row { background: rgba(0,255,136,0.02); }
+    .preview-row.section-row {
+      background: var(--surface);
+      padding: 6px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .preview-col-step {
+      flex: 0 0 35%;
+      display: flex; align-items: flex-start; gap: 8px;
+      min-width: 0;
+    }
+    .preview-col-script {
+      flex: 1;
+      min-width: 0;
+    }
+    .preview-col-time {
+      flex: 0 0 90px;
+      text-align: right;
+      padding-right: 32px;
+      font-size: 11px;
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--muted);
+      padding-top: 2px;
+    }
+    .preview-step-badge {
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      font-size: 10px; font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .node-row .preview-step-badge {
+      background: linear-gradient(135deg, rgba(0,212,255,0.15), rgba(124,58,237,0.15));
+      border: 1px solid rgba(0,212,255,0.3);
+      color: var(--accent);
+    }
+    .link-row .preview-step-badge {
+      background: rgba(0,255,136,0.1);
+      border: 1px solid rgba(0,255,136,0.25);
+      color: var(--green);
+    }
+    .preview-step-label {
+      font-size: 13px; line-height: 1.4;
+      flex: 1; min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .preview-step-label .step-type {
+      color: var(--muted); font-size: 11px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .preview-step-label .step-arrow {
+      color: var(--green); font-weight: 600; margin: 0 3px;
+    }
+    .preview-narration {
+      width: 100%;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 12px;
+      font-family: 'Inter', system-ui, sans-serif;
+      line-height: 1.5;
+      padding: 6px 10px;
+      resize: none;
+      min-height: 32px;
+      height: auto;
+      overflow: hidden;
+      field-sizing: content;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .preview-narration:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(0,212,255,0.1);
+    }
+    .preview-narration::placeholder { color: var(--muted); opacity: 0.6; }
+    .preview-section-bar {
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--muted);
+      width: 100%;
+    }
+    .preview-actions {
+      display: flex; gap: 8px; padding: 12px 16px;
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+      border-radius: 0 0 10px 10px;
+      position: sticky; bottom: 0; z-index: 2;
+    }
+    .btn-gen-vo {
+      background: linear-gradient(135deg, var(--accent), var(--purple));
+      color: white; border: none; font-weight: 600;
+      padding: 6px 14px; border-radius: 6px; cursor: pointer;
+      font-size: 12px; transition: opacity 0.2s;
+    }
+    .btn-gen-vo:hover { opacity: 0.85; }
+    .btn-preview {
+      background: var(--surface2);
+      color: var(--accent);
+      border: 1px solid rgba(0,212,255,0.2);
+    }
+    .btn-preview:hover {
+      border-color: var(--accent);
+      background: rgba(0,212,255,0.06);
+    }
+    .btn-preview.active {
+      background: rgba(0,212,255,0.1);
+      border-color: var(--accent);
+    }
+  </style>
+
+  <!-- Optional local config (gitignored) -->
+  <script src="config.local.js" onerror=""></script>
+</head>
+<body>
+
+  <div class="app-layout">
+  <div class="app-left">
+
+  <header>
+    <div class="logo">
+      <div class="logo-icon">🎬</div>
+      <h1>ComfyUI <span>Replay</span> Generator</h1>
+    </div>
+    <p class="subtitle">Drag workflow JSON files → get animated console scripts instantly</p>
+  </header>
+
+  <!-- Unified Drop Zone -->
+  <div class="drop-zone" id="drop-zone">
+    <button class="clear-image" id="clear-image">✕ Clear Image</button>
+    <div id="drop-prompt">
+      <span class="drop-icon">📁</span>
+      <div class="drop-title">Drop workflow JSON, replay script, or screenshot here</div>
+      <p class="drop-sub">or <strong>click to browse</strong> — accepts <code>.json</code> workflows and images for AI narration</p>
+    </div>
+    <img id="image-preview" src="" alt="Workflow Preview" />
+  </div>
+  <input type="file" id="file-input" accept=".json,.js,image/*" multiple />
+
+  <!-- Options -->
+  <div class="options">
+    <div class="options-title">Replay Options 
+      <div>
+        <button class="btn-example" onclick="loadExampleWorkflow()">Use Example</button>
+        <button class="btn-example" style="margin-left:6px;" onclick="loadExampleWorkflow(true)">Use Example 2 (Short)</button>
+      </div>
+    </div>
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label" id="delay-label">Step Delay</div>
+        <div class="option-desc" id="delay-desc">Base milliseconds between each node</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <input type="range" id="delay-range" min="300" max="3000" step="100" value="1000" />
+        <input type="number" id="delay-input" value="1000" min="100" max="5000" step="100" />
+        <span style="color:var(--muted);font-size:13px;">ms</span>
+      </div>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Typing Speed</div>
+        <div class="option-desc">Base milliseconds per typed character (smaller = faster, larger = slower)</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <input type="range" id="typing-delay-range" min="15" max="200" step="5" value="50" />
+        <span id="typing-delay-label" style="color:var(--muted);font-size:13px;font-family:'JetBrains Mono',monospace;width:56px;">50ms</span>
+      </div>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Cursor Style</div>
+        <div class="option-desc">Choose the animated cursor appearance</div>
+      </div>
+      <select id="cursor-style">
+        <option value="macos" selected>macOS Cursor</option>
+        <option value="default">Default Arrow</option>
+      </select>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Cursor Size</div>
+        <div class="option-desc">Scale of the animated cursor</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <input type="range" id="cursor-size" min="16" max="64" step="4" value="24" />
+        <span id="cursor-size-label" style="color:var(--muted);font-size:13px;font-family:'JetBrains Mono',monospace;width:32px;">24px</span>
+      </div>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Camera Follow</div>
+        <div class="option-desc">Auto-pan canvas to keep the active node visible</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="camera-pan-toggle" checked>
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Camera Zoom</div>
+        <div class="option-desc">Zoom in on nodes and connections to keep focus tight</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="camera-zoom-toggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <details class="options-section">
+      <summary>Video Options</summary>
+      <div class="options-body">
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Record Video <span class="option-tip" data-tip="Requires: git clone repo → npm install → npm run record"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></span></div>
+        <div class="option-desc">Prompt to screen-record the replay tab</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="record-video-toggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Convert to MP4 <span class="option-tip" data-tip="Requires: git clone repo → npm install → npm run record"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></span></div>
+        <div class="option-desc">Re-encode recording from WebM to MP4 (browser-side FFmpeg)</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="mp4-toggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Export FCPXML <span class="option-tip" data-tip="Requires: git clone repo → npm install → npm run record"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></span></div>
+        <div class="option-desc">Generate an XML timeline with cuts for Premiere/Final Cut</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="xml-toggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+      </div>
+    </details>
+
+    <details class="options-section">
+      <summary>UI Options</summary>
+      <div class="options-body">
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Show Node Labels</div>
+        <div class="option-desc">Show the node title as a small on-screen caption as it's created</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="captions-toggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Animate Node Resize</div>
+        <div class="option-desc">Animate each node from its default computed size to the workflow's target size after placement (experimental — may interact with widget callbacks)</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="node-resize-toggle" checked>
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Keep Everything In View</div>
+        <div class="option-desc">After each placement, smoothly re-frames the camera to fit all nodes so far. Prevents the graph from drifting off-screen as it grows. Also frames source + destination together during humanistic copy-paste.</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="autofit-toggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Humanistic Mode</div>
+        <div class="option-desc">Detects duplicated nodes and clusters. Rather than rebuilding each one from scratch, the replay selects the original, copy-pastes it, repositions, then tweaks any differing widget values — the way a real user would work.</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="humanistic-toggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Animate Combo Selection</div>
+        <div class="option-desc">For Vue-rendered nodes, cursor visits the combo widget, opens its dropdown, and clicks the target option — driving the real PrimeVue Select. Falls back to silent set if the node isn't a Vue node.</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="combo-ui-toggle" checked>
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Resize Duration</div>
+        <div class="option-desc">How long the resize animation runs</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <input type="range" id="resize-duration" min="100" max="1500" step="50" value="500" />
+        <span id="resize-duration-label" style="color:var(--muted);font-size:13px;font-family:'JetBrains Mono',monospace;width:56px;">500ms</span>
+      </div>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Resize Easing</div>
+        <div class="option-desc">Animation curve for the resize</div>
+      </div>
+      <select id="resize-easing">
+        <option value="cubic" selected>Smooth (ease in-out)</option>
+        <option value="linear">Linear</option>
+        <option value="easeOut">Ease Out</option>
+        <option value="easeIn">Ease In</option>
+        <option value="back">Back (overshoot)</option>
+      </select>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Resize Start Size</div>
+        <div class="option-desc">Where the resize animation begins from</div>
+      </div>
+      <select id="resize-start">
+        <option value="default" selected>Default (LiteGraph minimum)</option>
+        <option value="half">Half target size</option>
+        <option value="quarter">Quarter target size</option>
+        <option value="zero">Near-zero (grow from a point)</option>
+      </select>
+    </div>
+      </div>
+    </details>
+
+    <details class="options-section">
+      <summary>VO Options</summary>
+      <div class="options-body">
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Show VO Captions</div>
+        <div class="option-desc">Display the narration script text as on-screen captions</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="vo-captions-toggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">AI Voice Over Timing</div>
+        <div class="option-desc">Adjust replay speed to match narration word count</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="ai-timing-toggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+      </div>
+    </details>
+
+    <details class="options-section">
+      <summary>Debug Options</summary>
+      <div class="options-body">
+    <div class="option-row">
+      <div class="option-meta">
+        <div class="option-label">Show Debug Log</div>
+        <div class="option-desc">Display replay events on screen</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="show-debug-log-toggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+      </div>
+    </details>
+
+    <details class="options-section">
+      <summary>AI Settings (Optional)</summary>
+      <div class="options-body">
+    <div class="ai-config-auto" id="config-auto-badge">
+      ✅ Local config loaded — using <strong id="config-auto-provider">Google Gemini</strong>
+    </div>
+    <div id="ai-manual-config">
+      <div class="option-row">
+        <div class="option-meta">
+          <div class="option-label">AI Provider</div>
+          <div class="option-desc">Choose your AI for narration generation</div>
+        </div>
+        <select id="ai-provider">
+          <option value="google">Google Gemini</option>
+          <option value="anthropic">Anthropic Claude</option>
+          <option value="openai">OpenAI GPT-4o</option>
+        </select>
+      </div>
+      <div class="cors-note" id="cors-note">
+        ⚠️ This provider requires a CORS proxy for browser-direct calls. Google Gemini is recommended for browser use.
+      </div>
+      <div class="option-row">
+        <div class="option-meta">
+          <div class="option-label">API Key</div>
+          <div class="option-desc" id="api-key-hint">Get a key from <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:var(--accent);text-decoration:none;">AI Studio</a></div>
+        </div>
+        <input type="password" id="ai-key" placeholder="Enter key..." />
+      </div>
+    </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- Queue -->
+  <div class="queue" id="queue-section">
+    <div class="queue-title">Queue</div>
+    <div id="queue-list">
+      <div class="empty-queue">No files yet — drop some workflows above ☝️</div>
+    </div>
+  </div>
+
+  </div> <!-- end app-left -->
+
+  <!-- Right sidebar: VO Script Preview -->
+  <div class="app-right" id="app-right">
+    <div class="app-right-empty" id="preview-empty">
+      <div>
+        <span class="empty-icon">📝</span>
+        <div>Drop a workflow JSON to see the<br>VO Script Preview here</div>
+      </div>
+    </div>
+    <div id="preview-sidebar" style="display:none;"></div>
+  </div>
+
+  </div> <!-- end app-layout -->
+
+  <script>
+    // ── State ──────────────────────────────────────────────────────────────────
+    const files = new Map();
+    let delay = 1000;
+    let activeImageBase64 = null;
+    let activeImageMime = null;
+    let useAITiming = false;
+    let useCameraPan = true;
+    let useCameraZoom = false;
+    let convertToMp4 = false;
+    let exportXml = false;
+    let recordVideo = false;
+    let showDebugLog = false;
+    let showCaptions = false;
+    let useNodeResize = true;
+    let useComboUI = true;
+    let useHumanistic = false;
+    let useAutoFit = false;
+    let typingDelay = 50;
+    let resizeDuration = 500;
+    let resizeEasing = 'cubic';
+    let resizeStart = 'default';
+    let showVOCaptions = false;
+    let cursorStyle = 'macos';
+    let cursorSize = 24;
+
+    // AI Provider config — check local config first, then localStorage
+    const localConfig = window.__COMFY_CONFIG || null;
+    let aiProvider = localConfig?.provider || localStorage.getItem('ai_provider') || 'google';
+    let aiKey = localConfig?.apiKey || localStorage.getItem('ai_key') || '';
+
+    if (localConfig?.apiKey) {
+      // Auto-configured from config.local.js
+      document.getElementById('config-auto-badge').style.display = 'block';
+      const provNames = { google: 'Google Gemini', anthropic: 'Anthropic Claude', openai: 'OpenAI GPT-4o' };
+      document.getElementById('config-auto-provider').textContent = provNames[aiProvider] || aiProvider;
+      document.getElementById('ai-manual-config').style.display = 'none';
+    } else {
+      document.getElementById('ai-provider').value = aiProvider;
+      if (aiKey) document.getElementById('ai-key').value = aiKey;
+    }
+
+    // ── Topological Sort ───────────────────────────────────────────────────────
+    function topoSort(nodes, links) {
+      const nodeMap = new Map(nodes.map(n => [n.id, n]));
+      const inDegree = new Map(nodes.map(n => [n.id, 0]));
+      const adj = new Map(nodes.map(n => [n.id, []]));
+
+      for (const [, srcId,, tgtId] of links) {
+        if (nodeMap.has(srcId) && nodeMap.has(tgtId)) {
+          adj.get(srcId).push(tgtId);
+          inDegree.set(tgtId, inDegree.get(tgtId) + 1);
+        }
+      }
+
+      const queue = [...inDegree.entries()].filter(([,d]) => d === 0).map(([id]) => id);
+      const sorted = [];
+      while (queue.length) {
+        queue.sort((a, b) => {
+          const pa = nodeMap.get(a).pos || [0, 0];
+          const pb = nodeMap.get(b).pos || [0, 0];
+          return pa[0] - pb[0] || pa[1] - pb[1];
+        });
+        const cur = queue.shift();
+        sorted.push(cur);
+        for (const nb of adj.get(cur) || []) {
+          inDegree.set(nb, inDegree.get(nb) - 1);
+          if (inDegree.get(nb) === 0) queue.push(nb);
+        }
+      }
+      nodes.forEach(n => { if (!sorted.includes(n.id)) sorted.push(n.id); });
+      return sorted.map(id => nodeMap.get(id)).filter(Boolean);
+    }
+
+    // ── Script Generator ───────────────────────────────────────────────────────
+    function generateScript(workflow, delayMs, filename, narrations = null, deletedMetaSteps = []) {
+      const nodes = workflow.nodes || [];
+      const links = workflow.links || [];
+      const sorted = topoSort(nodes, links);
+      const narrationsJson = narrations ? JSON.stringify(narrations) : 'null';
+      const skipZoom = deletedMetaSteps.includes('__zoom');
+      const skipQueue = deletedMetaSteps.includes('__queue');
+
+      const connectionsByTarget = new Map();
+      for (const [lid, srcId, srcSlot, tgtId, tgtSlot] of links) {
+        if (!connectionsByTarget.has(tgtId)) connectionsByTarget.set(tgtId, []);
+        connectionsByTarget.get(tgtId, []).push({ srcId, srcSlot, tgtId, tgtSlot });
+      }
+      const connectionsInOrder = [];
+      for (const n of sorted) {
+        for (const c of connectionsByTarget.get(n.id) || []) connectionsInOrder.push(c);
+      }
+
+      const nodesData = sorted.map(n => ({
+        id: n.id,
+        type: n.type,
+        title: n.title || n.type,
+        pos: Array.isArray(n.pos) ? n.pos : [n.pos?.x || 100, n.pos?.y || 100],
+        size: n.size || [210, 80],
+        widgets_values: n.widgets_values || null,
+        properties: n.properties || null,
+      }));
+
+      // ── Humanistic-mode clone detection ───────────────────────────
+      // Find duplicated nodes/clusters so the replay can copy-paste
+      // them instead of rebuilding every node from scratch. The plan
+      // is purely a hint — the runtime falls back to fresh-build for
+      // any clone whose original isn't ready in time.
+      const clonePlan = (function buildClonePlan() {
+        const nodeById = new Map(nodesData.map(n => [n.id, n]));
+        const widgetDiff = (orig, clone) => {
+          const o = orig.widgets_values || [], c = clone.widgets_values || [];
+          const diffs = [];
+          for (let i = 0; i < Math.max(o.length, c.length); i++) {
+            const ov = o[i], cv = c[i];
+            if (cv === undefined) continue;
+            const same = (typeof ov === 'object' && typeof cv === 'object')
+              ? JSON.stringify(ov) === JSON.stringify(cv)
+              : ov === cv;
+            if (!same) diffs.push({ idx: i, value: cv });
+          }
+          return diffs;
+        };
+
+        // Undirected adjacency over the replay nodeset
+        const adj = new Map();
+        for (const n of nodesData) adj.set(n.id, new Set());
+        for (const [, srcId, , tgtId] of links) {
+          if (adj.has(srcId) && adj.has(tgtId)) {
+            adj.get(srcId).add(tgtId);
+            adj.get(tgtId).add(srcId);
+          }
+        }
+        const seen = new Set();
+        const components = [];
+        for (const n of nodesData) {
+          if (seen.has(n.id)) continue;
+          const stack = [n.id], comp = [];
+          while (stack.length) {
+            const id = stack.pop();
+            if (seen.has(id)) continue;
+            seen.add(id); comp.push(id);
+            for (const nb of adj.get(id) || []) if (!seen.has(nb)) stack.push(nb);
+          }
+          components.push(comp);
+        }
+
+        // Group multi-node components by canonical signature.
+        // Mapping between two instances is positional after sorting
+        // each component by (type, id) — good enough for the typical
+        // "two-of-the-same chain" pattern; mismatched edges fall out
+        // of the signature and stay unmatched.
+        const groups = new Map();
+        for (const comp of components) {
+          if (comp.length < 2) continue;
+          const sorted = [...comp].sort((a, b) => {
+            const ta = nodeById.get(a).type, tb = nodeById.get(b).type;
+            if (ta !== tb) return ta < tb ? -1 : 1;
+            return a - b;
+          });
+          const posByOrig = new Map(sorted.map((id, i) => [id, i]));
+          const edges = [];
+          for (const [, srcId, srcSlot, tgtId, tgtSlot] of links) {
+            if (posByOrig.has(srcId) && posByOrig.has(tgtId)) {
+              edges.push([posByOrig.get(srcId), posByOrig.get(tgtId), srcSlot, tgtSlot]);
+            }
+          }
+          edges.sort((a,b) => a[0]-b[0] || a[1]-b[1] || a[2]-b[2] || a[3]-b[3]);
+          const sig = JSON.stringify({ t: sorted.map(id => nodeById.get(id).type), e: edges });
+          if (!groups.has(sig)) groups.set(sig, []);
+          groups.get(sig).push(sorted);
+        }
+
+        const clusters = []; // {originalIds, clones:[{cloneIds, idMap, widgetDiffs}]}
+        const inMatchedCluster = new Set();
+        for (const [, instances] of groups) {
+          if (instances.length < 2) continue;
+          const originalIds = instances[0];
+          for (const id of originalIds) inMatchedCluster.add(id);
+          const cloneEntries = [];
+          for (let i = 1; i < instances.length; i++) {
+            const cloneIds = instances[i];
+            const idMap = {};
+            const widgetDiffs = {};
+            for (let j = 0; j < originalIds.length; j++) {
+              const oId = originalIds[j], cId = cloneIds[j];
+              idMap[oId] = cId;
+              inMatchedCluster.add(cId);
+              const d = widgetDiff(nodeById.get(oId), nodeById.get(cId));
+              if (d.length) widgetDiffs[oId] = d;
+            }
+            cloneEntries.push({ cloneIds, idMap, widgetDiffs });
+          }
+          clusters.push({ originalIds, clones: cloneEntries });
+        }
+
+        // Single-node clones — only for nodes whose connected component
+        // is size 1 (i.e. real singletons in the placement set). Skipping
+        // singletons inside multi-node components avoids tangling with
+        // the cluster heuristic.
+        const singletonIds = components.filter(c => c.length === 1).map(c => c[0]);
+        const byType = new Map();
+        for (const id of singletonIds) {
+          const n = nodeById.get(id);
+          if (!byType.has(n.type)) byType.set(n.type, []);
+          byType.get(n.type).push(id);
+        }
+        const singles = []; // {originalId, cloneId, widgetDiffs}
+        for (const [, ids] of byType) {
+          if (ids.length < 2) continue;
+          const origId = ids[0];
+          for (let i = 1; i < ids.length; i++) {
+            singles.push({
+              originalId: origId,
+              cloneId: ids[i],
+              widgetDiffs: widgetDiff(nodeById.get(origId), nodeById.get(ids[i])),
+            });
+          }
+        }
+
+        // Internal links within each matched cluster — these come along
+        // for free with paste, so the runtime should skip the visible
+        // drag for them and mark them as already-connected.
+        const clusterInternalLinks = new Set();
+        for (const cluster of clusters) {
+          const allIds = new Set(cluster.originalIds);
+          for (const cl of cluster.clones) for (const id of cl.cloneIds) allIds.add(id);
+          for (let li = 0; li < links.length; li++) {
+            const [, srcId, , tgtId] = links[li];
+            if (allIds.has(srcId) && allIds.has(tgtId)) clusterInternalLinks.add(li);
+          }
+        }
+
+        return {
+          clusters,
+          singles,
+          clusterInternalLinks: [...clusterInternalLinks],
+        };
+      })();
+
+      // Slot names from the workflow JSON are critical for autogrow /
+      // widget-as-input nodes (Gemini, Grok, etc.) where the runtime
+      // node.inputs[] array contains widgets-converted-to-inputs that
+      // aren't represented in the workflow JSON. Workflow tgtSlot=0
+      // can be runtime inputs[5] in those cases. Carrying the name
+      // lets the IIFE translate at runtime via resolveSlot().
+      const nodesById = new Map(nodes.map(n => [n.id, n]));
+      const linksData = connectionsInOrder.map(c => {
+        const srcNode = nodesById.get(c.srcId);
+        const tgtNode = nodesById.get(c.tgtId);
+        return {
+          srcId: c.srcId, srcSlot: c.srcSlot, tgtId: c.tgtId, tgtSlot: c.tgtSlot,
+          srcSlotName: srcNode?.outputs?.[c.srcSlot]?.name || null,
+          tgtSlotName: tgtNode?.inputs?.[c.tgtSlot]?.name || null,
+        };
+      });
+
+      return `
+// ComfyUI Animated Replay — ${filename}
+// ${nodes.length} nodes | ${links.length} links | ${delayMs}ms delay
+// Stop: window.__replayStop = true;
+
+(async function() {
+  const DLY = ${delayMs};
+  const NODES = ${JSON.stringify(nodesData)};
+  const LINKS = ${JSON.stringify(linksData)};
+  const NARRATIONS = ${narrationsJson};
+  const USE_AI_TIMING = ${useAITiming};
+  const USE_CAMERA_PAN = ${useCameraPan};
+  const USE_CAMERA_ZOOM = ${useCameraZoom};
+  const CONVERT_TO_MP4 = ${convertToMp4};
+  const EXPORT_XML = ${exportXml};
+  const RECORD_VIDEO = ${recordVideo};
+  const SHOW_DEBUG_LOG = ${showDebugLog};
+  const CURSOR_STYLE = '${cursorStyle}';
+  const CURSOR_SIZE = ${cursorSize};
+  // Cursor tip offsets — the SVG tip sits at these viewBox coords.
+  // Scaled to CURSOR_SIZE and applied as the cursor div's transform
+  // so the visible tip lands on (cx, cy) and not the div's corner.
+  // Otherwise trails / links / ripples appear offset from the tip.
+  const __CURSOR_TIPS = {
+    default: { vb: 24, x: 5,   y: 3   },
+    macos:   { vb: 28, x: 8.2, y: 2.8 },
+  };
+  const __TIP = __CURSOR_TIPS[CURSOR_STYLE] || __CURSOR_TIPS.default;
+  const TIP_X = (__TIP.x / __TIP.vb) * CURSOR_SIZE;
+  const TIP_Y = (__TIP.y / __TIP.vb) * CURSOR_SIZE;
+  const __TIP_T = 'translate(' + (-TIP_X) + 'px,' + (-TIP_Y) + 'px)';
+  const SHOW_CAPTIONS = ${showCaptions};
+  const USE_NODE_RESIZE = ${useNodeResize};
+  const USE_COMBO_UI = ${useComboUI};
+  const USE_HUMANISTIC = ${useHumanistic};
+  const USE_AUTO_FIT = ${useAutoFit};
+  const CLONE_PLAN = ${JSON.stringify(clonePlan)};
+  const TYPING_DELAY = ${typingDelay};
+  const RESIZE_DURATION = ${resizeDuration};
+  const RESIZE_EASING = '${resizeEasing}';
+  const RESIZE_START = '${resizeStart}';
+  const SHOW_VO_CAPTIONS = ${showVOCaptions};
+  // ── Single-instance guard ──────────────────────────────────────────────────
+  // Re-pasting the script while a previous run is in flight would launch a
+  // second IIFE in parallel — overlapping audio, doubled mouse cursor, etc.
+  // We signal the prior run to stop, wait for it to release the flag, then
+  // claim ownership for this run.
+  if (window.__replayRunning) {
+    console.warn('%c⏹ Stopping previous replay before starting a new one…','color:#fcd34d;font-weight:bold;');
+    window.__replayStop = true;
+    const t0 = Date.now();
+    while (window.__replayRunning && Date.now() - t0 < 5000) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+    // Best-effort: also clean up any leftover audio elements from the prior run.
+    document.querySelectorAll('audio[data-comfy-vo]').forEach(el => { try { el.pause(); el.remove(); } catch(_){} });
+  }
+  window.__replayStop = false;
+  window.__replayRunning = true;
+
+  document.getElementById('__rc')?.remove();
+  document.getElementById('__ro')?.remove();
+  document.getElementById('__rs')?.remove();
+
+  const sty=document.createElement('style');sty.id='__rs';
+  sty.textContent='@keyframes __rr{0%{transform:translate(-50%,-50%) scale(0);opacity:.6}100%{transform:translate(-50%,-50%) scale(1);opacity:0}}'
+    +'@keyframes __rck{0%{transform:'+__TIP_T+' scale(1)}50%{transform:'+__TIP_T+' scale(.75)}100%{transform:'+__TIP_T+' scale(1)}}'
+    +'@keyframes __rlb{0%{opacity:0;transform:translateY(6px)}15%{opacity:1;transform:translateY(0)}85%{opacity:1}100%{opacity:0}}'
+    +'#__rc.ck{animation:__rck .15s ease-in-out}';
+  document.head.appendChild(sty);
+
+  const CURSOR_SVGS = {
+    default: '<svg width="'+CURSOR_SIZE+'" height="'+CURSOR_SIZE+'" viewBox="0 0 24 24" fill="none"><path d="M5 3L19 12L12 13L9 20L5 3Z" fill="white" stroke="black" stroke-width="1.5" stroke-linejoin="round"/></svg>',
+    macos: '<svg width="'+CURSOR_SIZE+'" height="'+CURSOR_SIZE+'" viewBox="0 0 28 28" fill="none"><path d="M8.2 2.8L8.2 24.2L13.4 18.6L18.2 26.8L22.2 24.4L17.2 16.6L24.2 16.2L8.2 2.8Z" fill="black" stroke="white" stroke-width="1.8" stroke-linejoin="round"/></svg>'
+  };
+  const cur=document.createElement('div');cur.id='__rc';
+  cur.innerHTML=CURSOR_SVGS[CURSOR_STYLE]||CURSOR_SVGS.default;
+  Object.assign(cur.style,{position:'fixed',top:'0',left:'0',width:CURSOR_SIZE+'px',height:CURSOR_SIZE+'px',zIndex:'999999',pointerEvents:'none',filter:'drop-shadow(1px 2px 3px rgba(0,0,0,.4))',transform:__TIP_T});
+  document.body.appendChild(cur);
+
+  const ov=document.createElement('div');ov.id='__ro';
+  Object.assign(ov.style,{position:'fixed',top:'0',left:'0',width:'100%',height:'100%',zIndex:'999998',pointerEvents:'none'});
+  document.body.appendChild(ov);
+
+  let cx=window.innerWidth/2,cy=window.innerHeight/2;
+  cur.style.left=cx+'px';cur.style.top=cy+'px';
+
+  const slp=ms=>new Promise(r=>setTimeout(r,ms));
+  const frm=()=>new Promise(r=>requestAnimationFrame(r));
+  function log(s,t,m){console.log('%c[Step '+s+'/'+t+'] '+m,'color:#00d4ff;font-weight:bold;');}
+
+  const dbg = document.createElement('div');
+  Object.assign(dbg.style, {
+    position:'fixed', bottom:'20px', right:'20px', width:'380px', height:'220px',
+    background:'rgba(15,15,20,0.85)', backdropFilter:'blur(5px)', border:'1px solid #444',
+    borderRadius:'8px', padding:'12px', color:'#0ee', fontFamily:'monospace',
+    fontSize:'12px', overflowY:'auto', zIndex:'999999', pointerEvents:'none',
+    boxShadow:'0 10px 30px rgba(0,0,0,0.5)', display:'flex', flexDirection:'column', gap:'4px'
+  });
+  dbg.innerHTML = '<strong style="color:#fff;margin-bottom:6px;">📡 Replay Debug Log</strong>';
+  if(SHOW_DEBUG_LOG) document.body.appendChild(dbg); // only show if requested
+
+  function logD(msg, c='#0ee') {
+    if(!SHOW_DEBUG_LOG) return;
+    const t = new Date().toISOString().split('T')[1].slice(0,-1);
+    const line = document.createElement('div');
+    line.innerHTML = \`<span style="color:#888;">[\${t}]</span> <span style="color:\${c}">\${msg}</span>\`;
+    dbg.appendChild(line);
+    dbg.scrollTop = dbg.scrollHeight;
+  }
+
+  // ── VO (voice-over) infrastructure ──────────────────────────────────────────
+  // When USE_AI_TIMING is on AND NARRATIONS exist, the replay:
+  //   1. waits for Comfy to be ready (no login overlay, app.graph live)
+  //   2. pre-fetches every narration's MP3 from the local record-server /tts
+  //   3. paces each beat to Math.max(DLY, voClipDurationMs)
+  //   4. plays the audio at each beat
+  //   5. tags step events with audioKey so the server muxes audio at recorded offsets
+  const VO_SERVER = 'http://localhost:3001';
+  const VO_AUDIO = {}; // id -> { audioKey, audioUrl, durationMs }
+  let voReady = false; // true once prefetchVO has populated VO_AUDIO
+
+  // Wait for ComfyUI to be interactive. Gates beat zero so a login overlay
+  // or GPU cold-start doesn't ruin the first 30s of the recording.
+  async function waitForComfyReady(timeoutMs = 120000) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      if (window.__replayStop) return false;
+      const hasApp   = !!(window.app && window.app.graph && window.app.canvas);
+      const hasNodes = hasApp && Array.isArray(window.app.graph._nodes);
+      // Heuristic: look for any visible "loading" / "allocating" overlay text.
+      const overlay = document.querySelector('.p-dialog-mask, .loading-overlay, [role="progressbar"]');
+      const overlayVisible = !!(overlay && overlay.offsetParent !== null);
+      if (hasApp && hasNodes && !overlayVisible) {
+        // Extra sanity: probe /object_info; Cloud serves it on the same origin.
+        try {
+          const r = await fetch('/object_info', { method: 'GET' });
+          if (r.ok) { logD('Comfy ready ✓','#34d399'); return true; }
+        } catch (_) { /* fall through */ }
+      }
+      await new Promise(r => setTimeout(r, 250));
+    }
+    logD('waitForComfyReady timeout — proceeding anyway','#fca5a5');
+    return false;
+  }
+
+  // POST each narration text to /tts; populate VO_AUDIO with audioKey + duration.
+  // Runs in parallel for speed. Cache hits return instantly.
+  async function prefetchVO() {
+    if (!NARRATIONS) return;
+    const entries = Object.entries(NARRATIONS).filter(([k,v]) => typeof v === 'string' && v.trim().length > 0);
+    logD(\`Prefetching VO for \${entries.length} beats…\`, '#fcd34d');
+    const results = await Promise.all(entries.map(async ([id, text]) => {
+      try {
+        const r = await fetch(VO_SERVER + '/tts', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const j = await r.json();
+        VO_AUDIO[id] = { audioKey: j.key, audioUrl: VO_SERVER + j.audioUrl, durationMs: j.durationMs };
+        return true;
+      } catch (e) {
+        console.warn('VO fetch failed for', id, e.message);
+        return false;
+      }
+    }));
+    const ok = results.filter(Boolean).length;
+    logD(\`VO ready: \${ok}/\${entries.length} clips\`, ok === entries.length ? '#34d399' : '#fca5a5');
+    voReady = ok > 0;
+  }
+
+  // Play a beat's audio (fire-and-forget; does not block replay timing).
+  // Returns the durationMs so the caller can slp() for at least that long.
+  function playVO(id) {
+    const v = VO_AUDIO[id];
+    if (!v) return 0;
+    try {
+      const a = new Audio(v.audioUrl);
+      a.preload = 'auto';
+      a.dataset.comfyVo = id;                       // for cleanup by single-instance guard
+      a.addEventListener('ended', () => { try { a.remove(); } catch(_){} });
+      // Attach to DOM so we can find and stop it; also so its lifetime
+      // doesn't depend on garbage collection alone.
+      document.body.appendChild(a);
+      a.play().catch(e => console.warn('VO playback blocked:', e.message));
+    } catch (e) { /* ignore */ }
+    return v.durationMs;
+  }
+
+  // ── Recording: gate WS start on Comfy readiness + VO prefetch ───────────────
+  let recWs=null,recStartTime=0;
+
+  // beat-zero gate — only when we have VO to align or recording to capture
+  if ((USE_AI_TIMING && NARRATIONS) || RECORD_VIDEO) {
+    await waitForComfyReady();
+  }
+  if (USE_AI_TIMING && NARRATIONS) {
+    await prefetchVO();
+  }
+
+  if (RECORD_VIDEO) {
+    logD('RECORD_VIDEO is enabled. Connecting to record server...', '#fca5a5');
+    try {
+      recWs = new WebSocket('ws://localhost:3001');
+      await new Promise((resolve, reject) => {
+        recWs.onopen = () => {
+          logD('Connected to record server.', '#34d399');
+          recWs.send(JSON.stringify({type:'start'}));
+          recStartTime = Date.now();
+          logD('Recording STARTED (external ffmpeg).', '#00ff88');
+          console.log('%c🔴 Recording via ffmpeg!','color:#ff4444;font-size:14px;font-weight:bold;');
+          resolve();
+        };
+        recWs.onerror = (e) => {
+          logD('WebSocket error — is record-server.js running? (npm run record)', '#ef4444');
+          console.warn('⚠️ Recording skipped: Could not connect to record server. Run: npm run record');
+          recWs = null;
+          resolve();
+        };
+        setTimeout(() => { if(recWs?.readyState !== 1) { recWs = null; resolve(); } }, 3000);
+      });
+    } catch(e) {
+      logD('Recording connection failed: '+e.message, '#ef4444');
+      recWs = null;
+    }
+  }
+  // Loud warning when VO is on but recording isn't — the user will hear
+  // audio in-browser but no file will land on Desktop. This is the most
+  // common mis-configuration.
+  if (USE_AI_TIMING && NARRATIONS && !RECORD_VIDEO) {
+    console.warn('%c⚠️ AI Voice Over Timing is ON but Record Video is OFF.\\n   You\\'ll hear narration but no video file will be saved.\\n   Toggle "Record Video" in the generator UI, copy the script again, re-paste.','color:#fbbf24;font-size:13px;font-weight:bold;');
+  }
+  // recStep takes optional voId — if present and VO_AUDIO has the entry,
+  // server gets audioKey on the step event and muxes that clip at timeMs.
+  function recStep(name, voId) {
+    if(recWs && recWs.readyState !== 1) return;
+    const evt = { type:'step', name:name, timeMs:Date.now()-recStartTime };
+    if (voId && VO_AUDIO[voId]) evt.audioKey = VO_AUDIO[voId].audioKey;
+    if (recWs) recWs.send(JSON.stringify(evt));
+  }
+  function c2s(cx2,cy2){
+    const el=document.querySelector('canvas.graph-canvas-container')||document.querySelector('canvas#graph-canvas')||document.querySelector('canvas');
+    if(!el)return{x:cx2,y:cy2};const r=el.getBoundingClientRect(),ds=app.canvas.ds;
+    return{x:(cx2+ds.offset[0])*ds.scale+r.left,y:(cy2+ds.offset[1])*ds.scale+r.top};
+  }
+
+  // For autogrow / widget-as-input nodes, the runtime node.inputs[]
+  // contains widgets-converted-to-inputs and may not align by index
+  // with the workflow JSON inputs[]. Resolve the runtime index by
+  // matching slot name. Falls back to the workflow index when there
+  // is no name match (handles older workflows, plain nodes, etc.).
+  function resolveSlot(node, isInput, fallbackIdx, slotName) {
+    if (slotName) {
+      const list = isInput ? node.inputs : node.outputs;
+      if (list) {
+        const idx = list.findIndex(s => s && s.name === slotName);
+        if (idx >= 0) return idx;
+      }
+    }
+    return fallbackIdx;
+  }
+
+  async function cameraTo(cvX, cvY, targetScale, dur) {
+    dur = dur || 400; const ds = app.canvas.ds;
+    const sS = ds.scale, sOX = ds.offset[0], sOY = ds.offset[1];
+    const el = document.querySelector('canvas.graph-canvas-container') || document.querySelector('canvas#graph-canvas') || document.querySelector('canvas');
+    const rect = el ? el.getBoundingClientRect() : {width: window.innerWidth, height: window.innerHeight};
+    const nOX = (rect.width/2)/targetScale - cvX, nOY = (rect.height/2)/targetScale - cvY;
+    const steps = Math.max(20, Math.floor(dur/16));
+    for (let i = 0; i <= steps; i++) {
+      if (window.__replayStop) return;
+      const t = i / steps;
+      const ease = t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3)/2;
+      if (Math.abs(targetScale - sS) > 0.001) ds.scale = sS + (targetScale - sS) * ease;
+      ds.offset[0] = sOX + (nOX - sOX) * ease;
+      ds.offset[1] = sOY + (nOY - sOY) * ease;
+      app.canvas.setDirty(true, true); await frm();
+    }
+  }
+  async function panTo(cvX,cvY,dur){ await cameraTo(cvX, cvY, USE_CAMERA_ZOOM ? 1.3 : app.canvas.ds.scale, dur); }
+
+  async function moveTo(tx,ty,dur){dur=dur||500;const fx=cx,fy=cy,steps=Math.max(30,Math.floor(dur/16));
+    for(let i=0;i<=steps;i++){if(window.__replayStop)return;const t=i/steps,ease=t<.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2;
+      cx=fx+(tx-fx)*ease;cy=fy+(ty-fy)*ease;cur.style.left=cx+'px';cur.style.top=cy+'px';await frm();}cx=tx;cy=ty;}
+
+  function ripple(color){color=color||'rgba(0,212,255,.6)';cur.classList.remove('ck');void cur.offsetWidth;cur.classList.add('ck');
+    const r=document.createElement('div');Object.assign(r.style,{position:'fixed',left:cx+'px',top:cy+'px',width:'40px',height:'40px',borderRadius:'50%',border:'2px solid '+color,animation:'__rr .4s ease-out forwards',pointerEvents:'none'});
+    ov.appendChild(r);setTimeout(()=>r.remove(),500);}
+
+  function label(text,dur,isVO){if(isVO){if(!SHOW_VO_CAPTIONS)return;}else{if(!SHOW_CAPTIONS)return;}
+    dur=dur||2000;const l=document.createElement('div');l.textContent=text;
+    Object.assign(l.style,{position:'fixed',left:(cx+30)+'px',top:(cy-10)+'px',background:'rgba(0,0,0,.8)',color:'#00d4ff',padding:'4px 10px',borderRadius:'6px',fontSize:'13px',fontFamily:'system-ui',fontWeight:'500',pointerEvents:'none',zIndex:'999999',whiteSpace:isVO?'normal':'nowrap',maxWidth:isVO?'300px':'none',animation:'__rlb '+dur+'ms ease-in-out forwards'});
+    ov.appendChild(l);setTimeout(()=>l.remove(),dur);}
+
+  // Find the DOM input/textarea for a widget on a Vue-rendered node.
+  // Tries: direct aria-label on input, container with aria-label, then
+  // <label for=...> with matching text. Returns null if no match — the
+  // node is canvas-painted or the widget has no DOM representation
+  // (e.g., currently collapsed under "Show advanced inputs").
+  function findDomInputForWidget(nodeEl, widgetName) {
+    if (!nodeEl || !widgetName) return null;
+    const safe = widgetName.replace(/"/g, '\\"');
+    let el = nodeEl.querySelector('textarea[aria-label="' + safe + '"], input[aria-label="' + safe + '"]');
+    if (el) return el;
+    for (const c of nodeEl.querySelectorAll('[aria-label="' + safe + '"]')) {
+      if (c.matches('input, textarea')) return c;
+      const inner = c.querySelector('input, textarea');
+      if (inner) return inner;
+    }
+    for (const lab of nodeEl.querySelectorAll('label')) {
+      if (lab.textContent.trim() === widgetName && lab.htmlFor) {
+        const t = nodeEl.querySelector('#' + CSS.escape(lab.htmlFor));
+        if (t && t.matches('input, textarea')) return t;
+      }
+    }
+    return null;
+  }
+
+  // Type a value into a DOM input/textarea char-by-char. Visits the
+  // element with the animated cursor first, focuses, types each
+  // character with an InputEvent so Vue propagates reactively, then
+  // dispatches a final change event. Used for both text widgets
+  // (prompt) and numeric inputs (seed).
+  async function typeIntoDomInput(domEl, value) {
+    if (!domEl) return false;
+    const str = String(value);
+    const r = domEl.getBoundingClientRect();
+    await moveTo(r.left + r.width / 2, r.top + r.height / 2, 250);
+    ripple();
+    await slp(120);
+    try { domEl.focus(); } catch (e) {}
+    await slp(40);
+    domEl.value = '';
+    domEl.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+    await slp(40);
+    for (let i = 0; i < str.length; i++) {
+      if (window.__replayStop) break;
+      domEl.value = str.slice(0, i + 1);
+      domEl.dispatchEvent(new InputEvent('input', {
+        bubbles: true, cancelable: true,
+        data: str[i], inputType: 'insertText',
+      }));
+      await slp(TYPING_DELAY + Math.random() * 30);
+    }
+    domEl.value = str;
+    domEl.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+    try { domEl.blur(); } catch (e) {}
+    return true;
+  }
+
+  // Type a value into a widget. Tries the DOM path first (for Vue-
+  // rendered nodes — the real textarea/input updates visibly), falls
+  // back to the canvas-painted blinking-cursor animation for plain
+  // LiteGraph widgets. Skips entirely if the widget is already at
+  // the target value.
+  async function typeInWidget(node, wi, text) {
+    if (!node.widgets || !node.widgets[wi]) return;
+    const w = node.widgets[wi];
+    if (String(w.value) === String(text)) return;  // skip — already set
+    const nodeEl = document.querySelector('[data-node-id="' + node.id + '"]');
+    if (nodeEl) {
+      const domEl = findDomInputForWidget(nodeEl, w.name);
+      if (domEl) {
+        await typeIntoDomInput(domEl, text);
+        const finalVal = (typeof w.value === 'number') ? Number(text) : text;
+        if (w.value !== finalVal) {
+          w.value = finalVal;
+          try { w.callback?.(finalVal); } catch (e) {}
+        }
+        return;
+      }
+    }
+    // Canvas-painted widget fallback: blinking cursor in the value
+    // field as we update widget.value character by character.
+    const wy = (w.last_y !== undefined) ? w.last_y + 10 : (30 + wi * 20);
+    const ns = c2s(node.pos[0] + node.size[0] / 2, node.pos[1] + wy);
+    await moveTo(ns.x, ns.y, 300); ripple(); await slp(200);
+    w.value = ''; const s = String(text);
+    let curVis = true;
+    const curBlink = setInterval(() => {
+      curVis = !curVis;
+      const base = String(w.value).endsWith('|') ? String(w.value).slice(0, -1) : w.value;
+      w.value = curVis ? base + '|' : base;
+      app.canvas.setDirty(true, true);
+    }, 400);
+    for (let i = 0; i < s.length; i++) {
+      if (window.__replayStop) { clearInterval(curBlink); w.value = s; return; }
+      w.value = s.slice(0, i + 1) + '|';
+      curVis = true;
+      app.canvas.setDirty(true, true);
+      await slp(TYPING_DELAY + Math.random() * 30);
+    }
+    clearInterval(curBlink); w.value = s; app.canvas.setDirty(true, true);
+    try { w.callback?.(w.value); } catch (e) {}
+    app.canvas.setDirty(true, true);
+  }
+
+  // Drive a Vue-rendered combo widget by clicking its real DOM
+  // PrimeVue Select. Cursor visits the combo, dropdown opens,
+  // cursor moves to the target option, click commits. If the
+  // node isn't Vue-rendered (no DOM presence) or the option
+  // can't be found, falls back to a silent value set.
+  async function selectComboViaUI(node, wi, value) {
+    const w = (node.widgets || [])[wi];
+    if (!w) return;
+    const target = String(value);
+
+    const ensureValueSet = () => {
+      if (w.value !== value) {
+        w.value = value;
+        try { w.callback?.(value); } catch (e) {}
+        app.canvas.setDirty(true, true);
+      }
+    };
+
+    if (!USE_COMBO_UI) { ensureValueSet(); return; }
+
+    try {
+      const nodeEl = document.querySelector('[data-node-id="' + node.id + '"]');
+      if (!nodeEl) { ensureValueSet(); return; }
+      const comboEl = nodeEl.querySelector('[role="combobox"][aria-label="' + w.name + '"]');
+      if (!comboEl) { ensureValueSet(); return; }
+
+      // Skip animation if already at target
+      if (comboEl.textContent.trim() === target) { ensureValueSet(); return; }
+
+      // Move cursor to combo, ripple
+      const r = comboEl.getBoundingClientRect();
+      await moveTo(r.left + r.width / 2, r.top + r.height / 2, 250);
+      ripple();
+      await slp(50);
+
+      // Synthetic click to open dropdown
+      const opts = (x, y, down) => ({
+        clientX: x, clientY: y, bubbles: true, cancelable: true,
+        button: 0, buttons: down ? 1 : 0, view: window,
+      });
+      const cx0 = r.left + r.width / 2, cy0 = r.top + r.height / 2;
+      comboEl.dispatchEvent(new PointerEvent('pointerdown', { ...opts(cx0, cy0, true), pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+      comboEl.dispatchEvent(new MouseEvent('mousedown', opts(cx0, cy0, true)));
+      comboEl.dispatchEvent(new PointerEvent('pointerup',   { ...opts(cx0, cy0, false), pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+      comboEl.dispatchEvent(new MouseEvent('mouseup',   opts(cx0, cy0, false)));
+      comboEl.dispatchEvent(new MouseEvent('click',     opts(cx0, cy0, false)));
+      await slp(280);
+
+      const overlay = document.querySelector('.p-select-overlay');
+      if (!overlay) { ensureValueSet(); return; }
+
+      const option = [...overlay.querySelectorAll('[role="option"]')].find(o =>
+        o.getAttribute('aria-label') === target
+      );
+      if (!option) {
+        document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        ensureValueSet();
+        return;
+      }
+
+      // Scroll option into view if dropdown is scrolled
+      try { option.scrollIntoView({ block: 'nearest', behavior: 'instant' }); } catch (e) {}
+      await slp(40);
+
+      const or = option.getBoundingClientRect();
+      await moveTo(or.left + or.width / 2, or.top + or.height / 2, 300);
+      ripple();
+      await slp(40);
+
+      const cx1 = or.left + or.width / 2, cy1 = or.top + or.height / 2;
+      option.dispatchEvent(new PointerEvent('pointerdown', { ...opts(cx1, cy1, true), pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+      option.dispatchEvent(new MouseEvent('mousedown', opts(cx1, cy1, true)));
+      option.dispatchEvent(new PointerEvent('pointerup',   { ...opts(cx1, cy1, false), pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+      option.dispatchEvent(new MouseEvent('mouseup',   opts(cx1, cy1, false)));
+      option.dispatchEvent(new MouseEvent('click',     opts(cx1, cy1, false)));
+      await slp(200);
+    } catch (e) {
+      console.warn('selectComboViaUI:', e.message);
+    }
+
+    // Safety net — guarantees widget value is at target even if
+    // the click chain didn't propagate for some reason.
+    ensureValueSet();
+  }
+
+  // The "control_after_generate" combo on seed widgets is rendered
+  // differently from regular combos — it's a Reka UI popover with
+  // four radio buttons (fixed / increment / decrement / randomize),
+  // triggered by the dice/shuffle icon next to the seed input.
+  // The trigger button has aria-haspopup="dialog" (not "listbox").
+  // This helper drives it: cursor → trigger click → popover opens →
+  // cursor → radio click → Escape to close.
+  async function selectControlAfterGenerate(node, wi, value) {
+    const w = (node.widgets || [])[wi];
+    if (!w) return;
+    const target = String(value);
+
+    const ensureValueSet = () => {
+      if (w.value !== value) {
+        w.value = value;
+        try { w.callback?.(value); } catch (e) {}
+        app.canvas.setDirty(true, true);
+      }
+    };
+
+    if (!USE_COMBO_UI || String(w.value) === target) { ensureValueSet(); return; }
+
+    try {
+      const nodeEl = document.querySelector('[data-node-id="' + node.id + '"]');
+      if (!nodeEl) { ensureValueSet(); return; }
+      // The popover trigger is unique on the node (only one per seed)
+      const trigger = nodeEl.querySelector('button[aria-haspopup="dialog"]');
+      if (!trigger) { ensureValueSet(); return; }
+
+      const opts = (x, y, down) => ({
+        clientX: x, clientY: y, bubbles: true, cancelable: true,
+        button: 0, buttons: down ? 1 : 0, view: window,
+      });
+      const click = (el, x, y) => {
+        el.dispatchEvent(new PointerEvent('pointerdown', { ...opts(x, y, true), pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+        el.dispatchEvent(new MouseEvent('mousedown', opts(x, y, true)));
+        el.dispatchEvent(new PointerEvent('pointerup',   { ...opts(x, y, false), pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+        el.dispatchEvent(new MouseEvent('mouseup',   opts(x, y, false)));
+        el.dispatchEvent(new MouseEvent('click',     opts(x, y, false)));
+      };
+
+      // Open the popover
+      const r = trigger.getBoundingClientRect();
+      await moveTo(r.left + r.width / 2, r.top + r.height / 2, 250);
+      ripple();
+      await slp(80);
+      click(trigger, r.left + r.width / 2, r.top + r.height / 2);
+      await slp(280);
+
+      // Find the radio by id matching the target value (fixed /
+      // increment / decrement / randomize)
+      const radio = document.querySelector('input[type="radio"][id="' + target + '"]');
+      if (!radio) {
+        document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        ensureValueSet();
+        return;
+      }
+      // Click the wrapping <label> when possible — broader target
+      const clickTarget = radio.closest('label') || radio;
+      const tr = clickTarget.getBoundingClientRect();
+      await moveTo(tr.left + tr.width / 2, tr.top + tr.height / 2, 280);
+      ripple();
+      await slp(80);
+      click(clickTarget, tr.left + tr.width / 2, tr.top + tr.height / 2);
+      await slp(200);
+
+      // Close the popover by re-clicking the trigger. Reka popovers
+      // toggle on trigger click. Cursor visibly returns to the dice
+      // icon and clicks it — same gesture a user would make. (Note:
+      // the trigger's aria-label updates to reflect the new mode,
+      // e.g., "Fixed Value", but selecting by aria-haspopup="dialog"
+      // still finds it.)
+      const trigger2 = nodeEl.querySelector('button[aria-haspopup="dialog"]');
+      if (trigger2 && document.querySelector('[data-reka-popper-content-wrapper]')) {
+        const tr2 = trigger2.getBoundingClientRect();
+        const x2 = tr2.left + tr2.width / 2, y2 = tr2.top + tr2.height / 2;
+        await moveTo(x2, y2, 250);
+        ripple();
+        await slp(80);
+        click(trigger2, x2, y2);
+        await slp(200);
+      }
+      // Defensive fallback: if for some reason the popover is still
+      // in the DOM, force-remove it so the viewer doesn't see a
+      // stuck UI element blocking the next node's animation.
+      if (document.querySelector('[data-reka-popper-content-wrapper]')) {
+        document.querySelectorAll('[data-reka-popper-content-wrapper]').forEach(el => el.remove());
+      }
+    } catch (e) {
+      console.warn('selectControlAfterGenerate:', e.message);
+    }
+
+    ensureValueSet();
+  }
+
+  // For non-text, non-combo widgets (numbers, booleans, etc.).
+  // On Vue-rendered nodes, types the value into the DOM input so
+  // the viewer sees a real interaction (the seed widget gets this
+  // treatment). On canvas-painted widgets, falls back to a hover +
+  // ripple + silent value set. Skips entirely if already at target.
+  async function clickWidget(node, wi, v) {
+    if (!node.widgets || !node.widgets[wi]) return;
+    const w = node.widgets[wi];
+    if (String(w.value) === String(v)) return;
+    const nodeEl = document.querySelector('[data-node-id="' + node.id + '"]');
+    if (nodeEl) {
+      const domEl = findDomInputForWidget(nodeEl, w.name);
+      if (domEl) {
+        await typeIntoDomInput(domEl, v);
+        const finalVal = (typeof w.value === 'number') ? Number(v) : v;
+        if (w.value !== finalVal) {
+          w.value = finalVal;
+          try { w.callback?.(finalVal); } catch (e) {}
+        }
+        return;
+      }
+    }
+    // Canvas-painted fallback
+    const wy = (w.last_y !== undefined) ? w.last_y + 10 : (30 + wi * 20);
+    const ns = c2s(node.pos[0] + node.size[0] / 2, node.pos[1] + wy);
+    await moveTo(ns.x, ns.y, 300);
+    ripple();
+    await slp(150);
+    w.value = v;
+    try { w.callback?.(v); } catch (e) {}
+    app.canvas.setDirty(true, true);
+  }
+
+  async function dragNodeTo(node, tx, ty, dur) {
+    dur = dur || 600;
+    const sx = node.pos[0], sy = node.pos[1];
+    if (Math.abs(sx - tx) < 2 && Math.abs(sy - ty) < 2) return;
+    
+    // grab the node header (top centerish)
+    const hx = sx + Math.min(node.size[0]/2, 100);
+    const hy = sy + 15;
+    const sc = c2s(hx, hy);
+    await moveTo(sc.x, sc.y, 300);
+    ripple(); await slp(150);
+    
+    const steps = Math.max(30, Math.floor(dur/16));
+    for (let i = 0; i <= steps; i++) {
+      if (window.__replayStop) return;
+      const t = i / steps;
+      const ease = t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3)/2;
+      node.pos[0] = sx + (tx - sx) * ease;
+      node.pos[1] = sy + (ty - sy) * ease;
+      
+      const curSC = c2s(node.pos[0] + Math.min(node.size[0]/2, 100), node.pos[1] + 15);
+      cx = curSC.x; cy = curSC.y;
+      cur.style.left = cx+'px'; cur.style.top = cy+'px';
+      app.canvas.setDirty(true,true);
+      await frm();
+    }
+    node.pos[0] = tx; node.pos[1] = ty;
+    ripple(); await slp(100);
+  }
+
+  // Easing functions. Each takes t in [0,1] and returns an eased
+  // value (typically also in [0,1], except 'back' which overshoots).
+  const EASINGS = {
+    linear:  t => t,
+    easeIn:  t => t*t*t,
+    easeOut: t => 1 - Math.pow(1-t, 3),
+    cubic:   t => t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3)/2,
+    back:    t => {
+      const c1 = 1.70158, c2 = c1 * 1.525;
+      return t < .5
+        ? (Math.pow(2*t, 2) * ((c2+1)*2*t - c2)) / 2
+        : (Math.pow(2*t-2, 2) * ((c2+1)*(2*t-2) + c2) + 2) / 2;
+    },
+  };
+
+  // Animate node.size from fromSize to toSize over dur ms using the
+  // named easing. Reassigns node.size each frame so any LiteGraph
+  // size-setter fires. To prevent the render loop from re-clamping
+  // node.size back to the computed minimum each frame (which was
+  // causing visible jitter), we monkey-patch node.computeSize to
+  // return the currently-animating size for the duration of the
+  // animation. Restored in finally so subsequent renders behave
+  // normally. Snaps without animating if deltas are both <4px.
+  async function animateResize(node, fromSize, toSize, dur, easingName) {
+    dur = dur || 400;
+    const easing = EASINGS[easingName] || EASINGS.cubic;
+    const dx = toSize[0] - fromSize[0], dy = toSize[1] - fromSize[1];
+    if (Math.abs(dx) < 4 && Math.abs(dy) < 4) {
+      node.size = [toSize[0], toSize[1]];
+      app.canvas.setDirty(true, true);
+      return;
+    }
+    const origComputeSize = node.computeSize;
+    node.computeSize = function () { return [this.size[0], this.size[1]]; };
+    try {
+      node.size = [fromSize[0], fromSize[1]];
+      app.canvas.setDirty(true, true);
+      await frm();
+      const steps = Math.max(20, Math.floor(dur / 16));
+      for (let i = 1; i <= steps; i++) {
+        if (window.__replayStop) break;
+        const t = i / steps;
+        const e = easing(t);
+        node.size = [fromSize[0] + dx * e, fromSize[1] + dy * e];
+        app.canvas.setDirty(true, true);
+        await frm();
+      }
+      node.size = [toSize[0], toSize[1]];
+      app.canvas.setDirty(true, true);
+    } finally {
+      node.computeSize = origComputeSize;
+    }
+  }
+
+  async function dragTo(fx,fy,tx,ty,dur){dur=dur||700;await moveTo(fx,fy,400);await slp(100);ripple();await slp(100);
+    const trail=document.createElement('canvas');trail.width=window.innerWidth;trail.height=window.innerHeight;
+    Object.assign(trail.style,{position:'fixed',top:'0',left:'0',width:'100%',height:'100%',zIndex:'999997',pointerEvents:'none'});
+    ov.appendChild(trail);const ctx=trail.getContext('2d'),steps=Math.max(30,Math.floor(dur/16));let px=fx,py=fy;
+    for(let i=0;i<=steps;i++){if(window.__replayStop){trail.remove();return;}const t=i/steps,ease=t<.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2;
+      cx=fx+(tx-fx)*ease;cy=fy+(ty-fy)*ease;cur.style.left=cx+'px';cur.style.top=cy+'px';
+      ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(cx,cy);ctx.strokeStyle='rgba(0,212,255,.3)';ctx.lineWidth=2;ctx.stroke();px=cx;py=cy;await frm();}
+    ripple();let op=1;const fi=setInterval(()=>{op-=.05;trail.style.opacity=op;if(op<=0){clearInterval(fi);trail.remove();}},30);}
+
+  // ── Add via native Search Dialog (hybrid) ─────────────────
+  // Visually opens the ComfyUI search dialog, types the node
+  // name into the real input so the real result list renders,
+  // moves the cursor to the first result, then closes the
+  // dialog WITHOUT clicking a row (clicking enters a Vue
+  // placement-mode that cannot be committed by synthetic events
+  // — see experiments/placement-commit-probe.js). The actual
+  // node is created via LiteGraph.createNode + app.graph.add
+  // at the exact target canvas position. Returns the created
+  // node, or null on failure.
+  async function addViaSearchDialog(nd, sx, sy) {
+    ripple('rgba(255,165,0,.6)');
+    await slp(100);
+
+    let dialogOpened = false;
+    try {
+      await app.extensionManager?.command?.execute('Workspace.SearchBox.Toggle');
+      await slp(300);
+      dialogOpened = !!document.querySelector('.p-dialog-mask');
+    } catch (e) { console.warn('Search dialog command failed:', e.message); }
+
+    if (dialogOpened && !window.__replayStop) {
+      const inp = document.querySelector('input[aria-controls="results-list"]')
+                || document.querySelector('input[role="combobox"][placeholder="Add a node..."]');
+      if (inp) {
+        const ir = inp.getBoundingClientRect();
+        await moveTo(ir.left + ir.width / 2, ir.top + ir.height / 2, 300);
+        ripple();
+        inp.focus(); inp.value = '';
+        inp.dispatchEvent(new Event('input', { bubbles: true }));
+        await slp(50);
+        const reg = LiteGraph.registered_node_types[nd.type];
+        const query = reg?.title || (nd.title && nd.title !== nd.type ? nd.title : nd.type);
+        // Type the query, but stop early once the first result row
+        // already matches our target — saves typing out a long name
+        // when 3-4 characters are enough to filter the dropdown.
+        const targetLc = query.toLowerCase();
+        for (let i = 0; i < query.length; i++) {
+          if (window.__replayStop) break;
+          inp.value = query.slice(0, i + 1);
+          inp.dispatchEvent(new InputEvent('input', { bubbles: true, data: query[i], inputType: 'insertText' }));
+          await slp(TYPING_DELAY + Math.random() * 30);
+          if (i >= 2) {
+            const firstResult = document.querySelector('[data-testid="result-item"]');
+            if (firstResult && firstResult.textContent.trim().toLowerCase().startsWith(targetLc)) {
+              break;
+            }
+          }
+        }
+        await slp(400);
+        const firstRow = document.querySelector('[data-testid="result-item"]');
+        if (firstRow && !window.__replayStop) {
+          const rr = firstRow.getBoundingClientRect();
+          await moveTo(rr.left + rr.width / 2, rr.top + rr.height / 2, 300);
+          ripple();
+          await slp(200);
+        }
+      }
+
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      document.body.dispatchEvent(new KeyboardEvent('keyup',   { key: 'Escape', bubbles: true, cancelable: true }));
+      await slp(200);
+      if (document.querySelector('.p-dialog-mask')) {
+        try { await app.extensionManager?.command?.execute('Workspace.SearchBox.Toggle'); } catch (e) {}
+        await slp(200);
+      }
+    }
+
+    if (!window.__replayStop) {
+      await moveTo(sx, sy, 400);
+      ripple('rgba(0,255,136,.6)');
+    }
+
+    const created = LiteGraph.createNode(nd.type);
+    if (!created) { console.warn('Could not create node:', nd.type); return null; }
+    created.pos = [nd.pos[0], nd.pos[1]];
+    app.graph.add(created);
+    // Clear any stale output preview that the Vue frontend auto-loads
+    // for output nodes (SaveImage, PreviewImage) based on filename_prefix.
+    if (created.imgs) created.imgs = [];
+    if (created.images) created.images = [];
+    app.canvas.setDirty(true, true);
+    await slp(150);
+    return created;
+  }
+
+  function isTextWidget(w){if(!w)return false;const t=(w.type||'').toLowerCase();
+    if(t==='combo')return false;
+    if(t==='text'||t==='string'||t==='customtext')return true;if(w.options?.multiline)return true;
+    if(typeof w.value==='string'&&w.value.length>20)return true;return false;}
+
+  // ── Humanistic-mode runtime helpers ────────────────────────────
+  // Pre-indexed views over CLONE_PLAN so the main loop can ask
+  // O(1) questions like "is this node a clone?" / "which cluster
+  // does it trigger?". Empty/no-op when USE_HUMANISTIC is false.
+  const cloneByCloneId = new Map();          // cloneNodeId -> {originalId, widgetDiffs}
+  const clusterByTriggerId = new Map();      // first-clone-id-in-topo -> {originalIds, cloneIds, idMap, widgetDiffs}
+  const skipPlacement = new Set();           // clone node ids that the cluster routine will place
+  const internalLinkSet = new Set(USE_HUMANISTIC ? (CLONE_PLAN.clusterInternalLinks || []) : []);
+
+  if (USE_HUMANISTIC) {
+    for (const s of (CLONE_PLAN.singles || [])) {
+      cloneByCloneId.set(s.cloneId, { kind: 'single', originalId: s.originalId, widgetDiffs: s.widgetDiffs });
+    }
+    // For each cluster-clone, the "trigger" is whichever of its node
+    // ids appears first in NODES (topo) order — that's when we run
+    // the marquee+copy+paste routine and mark the rest skipped.
+    const orderIdx = new Map(NODES.map((n, i) => [n.id, i]));
+    for (const cluster of (CLONE_PLAN.clusters || [])) {
+      for (const cl of cluster.clones) {
+        let triggerId = cl.cloneIds[0], best = Infinity;
+        for (const id of cl.cloneIds) {
+          const i = orderIdx.has(id) ? orderIdx.get(id) : Infinity;
+          if (i < best) { best = i; triggerId = id; }
+        }
+        clusterByTriggerId.set(triggerId, {
+          originalIds: cluster.originalIds,
+          cloneIds: cl.cloneIds,
+          idMap: cl.idMap,
+          widgetDiffs: cl.widgetDiffs,
+        });
+        for (const id of cl.cloneIds) if (id !== triggerId) skipPlacement.add(id);
+      }
+    }
+  }
+
+  // Wait for a node to land in app.graph (paste is async-ish in the Vue front-end).
+  async function waitForNodes(predicate, timeoutMs) {
+    timeoutMs = timeoutMs || 1500;
+    const t0 = performance.now();
+    while (performance.now() - t0 < timeoutMs) {
+      const found = predicate();
+      if (found) return found;
+      await slp(40);
+    }
+    return predicate();
+  }
+
+  // Select a set of nodes by id (graph-side). The visible "marquee"
+  // is just a transient overlay — actual selection goes through
+  // app.canvas.selectNodes for reliability.
+  function selectNodes(nodes) {
+    try {
+      if (app.canvas.deselectAllNodes) app.canvas.deselectAllNodes();
+      if (app.canvas.selectNodes) app.canvas.selectNodes(nodes, false);
+      else if (app.canvas.selectNode) for (const n of nodes) app.canvas.selectNode(n, true);
+      app.canvas.setDirty(true, true);
+    } catch (e) { console.warn('selectNodes failed:', e); }
+  }
+
+  async function drawMarquee(screenBox, dur) {
+    dur = dur || 350;
+    const box = document.createElement('div');
+    Object.assign(box.style, {
+      position:'fixed', left:screenBox.x+'px', top:screenBox.y+'px',
+      width:'0px', height:'0px',
+      border:'1.5px dashed rgba(0,212,255,.85)',
+      background:'rgba(0,212,255,.08)',
+      pointerEvents:'none', zIndex:'999997',
+    });
+    document.body.appendChild(box);
+    const steps = Math.max(8, Math.floor(dur/24));
+    for (let i = 1; i <= steps; i++) {
+      box.style.width  = (screenBox.w * i/steps) + 'px';
+      box.style.height = (screenBox.h * i/steps) + 'px';
+      await slp(dur/steps);
+    }
+    await slp(150);
+    box.style.transition = 'opacity .3s';
+    box.style.opacity = '0';
+    setTimeout(() => box.remove(), 400);
+  }
+
+  // Fit camera to a canvas-space bounding box {x,y,w,h}, leaving paddingPx
+  // viewport pixels of breathing room on each side. Scale is clamped to a
+  // reasonable upper bound so tiny boxes don't zoom in absurdly far.
+  async function fitToBox(box, paddingPx, dur) {
+    if (!box || !isFinite(box.w) || !isFinite(box.h) || box.w <= 0 || box.h <= 0) return;
+    paddingPx = paddingPx == null ? 80 : paddingPx;
+    dur = dur || 500;
+    const el = document.querySelector('canvas.graph-canvas-container')
+            || document.querySelector('canvas#graph-canvas')
+            || document.querySelector('canvas');
+    const rect = el ? el.getBoundingClientRect() : { width: window.innerWidth, height: window.innerHeight };
+    const availW = Math.max(50, rect.width  - paddingPx * 2);
+    const availH = Math.max(50, rect.height - paddingPx * 2);
+    const scale = Math.min(availW / box.w, availH / box.h, 1.4);
+    const cx2 = box.x + box.w / 2, cy2 = box.y + box.h / 2;
+    await cameraTo(cx2, cy2, scale, dur);
+  }
+
+  // Bounding box (canvas-space) covering all currently-placed nodes
+  // (anything with a refs[] entry). Used by the auto-fit toggle.
+  function placedNodesBox() {
+    const placed = [];
+    for (const k in refs) {
+      const n = app.graph.getNodeById(refs[k]);
+      if (n) placed.push(n);
+    }
+    if (!placed.length) return null;
+    return nodesBoundingCanvas(placed);
+  }
+
+  function nodesBoundingCanvas(nodes) {
+    let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+    for (const n of nodes) {
+      x0 = Math.min(x0, n.pos[0]);
+      y0 = Math.min(y0, n.pos[1]);
+      x1 = Math.max(x1, n.pos[0] + (n.size?.[0]||210));
+      y1 = Math.max(y1, n.pos[1] + (n.size?.[1]||80));
+    }
+    return { x:x0, y:y0, w:x1-x0, h:y1-y0 };
+  }
+
+  async function copyPasteSelection() {
+    // Prefer LiteGraph's clipboard API; fall back to key events.
+    let pastedIdsBefore = new Set(app.graph._nodes.map(n => n.id));
+    try {
+      if (app.canvas.copyToClipboard) app.canvas.copyToClipboard();
+      else document.dispatchEvent(new KeyboardEvent('keydown', { key:'c', code:'KeyC', ctrlKey:true, metaKey:true, bubbles:true }));
+      await slp(120);
+      if (app.canvas.pasteFromClipboard) app.canvas.pasteFromClipboard();
+      else document.dispatchEvent(new KeyboardEvent('keydown', { key:'v', code:'KeyV', ctrlKey:true, metaKey:true, bubbles:true }));
+    } catch (e) { console.warn('copy/paste API failed, trying key events:', e); }
+    await slp(200);
+    const newNodes = app.graph._nodes.filter(n => !pastedIdsBefore.has(n.id));
+    return newNodes;
+  }
+
+  async function applyWidgetDiffs(node, diffs) {
+    if (!diffs || !diffs.length || !node.widgets) return;
+    for (const { idx, value } of diffs) {
+      if (idx >= node.widgets.length) continue;
+      const w = node.widgets[idx];
+      if (typeof value === 'string' && isTextWidget(w)) {
+        // Replace current value with target via the typing animation.
+        w.value = '';
+        await typeInWidget(node, idx, value);
+      } else if (w.type === 'combo') {
+        if (w.name === 'control_after_generate') await selectControlAfterGenerate(node, idx, value);
+        else await selectComboViaUI(node, idx, value);
+      } else {
+        await clickWidget(node, idx, value);
+      }
+    }
+  }
+
+  // Pos/size/widgets/properties for a freshly-built fallback node.
+  // Mirrors the original placement block but in helper form so the
+  // humanistic branches can recover without duplicating logic.
+  async function finishCreatedNode(created, nd) {
+    const hasTargetSize = nd.size && typeof nd.size[0] === 'number' && typeof nd.size[1] === 'number';
+    const defaultSize = [created.size[0], created.size[1]];
+    created.pos = [nd.pos[0], nd.pos[1]];
+    if (nd.title !== nd.type) created.title = nd.title;
+    if (USE_NODE_RESIZE && hasTargetSize) {
+      const tgt = [nd.size[0], nd.size[1]];
+      let startSize;
+      if      (RESIZE_START === 'zero')    startSize = [1, 1];
+      else if (RESIZE_START === 'quarter') startSize = [tgt[0]/4, tgt[1]/4];
+      else if (RESIZE_START === 'half')    startSize = [tgt[0]/2, tgt[1]/2];
+      else                                  startSize = defaultSize;
+      app.canvas.setDirty(true,true); await slp(50);
+      await animateResize(created, startSize, tgt, RESIZE_DURATION, RESIZE_EASING);
+    } else {
+      if (hasTargetSize) created.size = [nd.size[0], nd.size[1]];
+      app.canvas.setDirty(true,true); await slp(50);
+    }
+    if (nd.widgets_values && created.widgets) {
+      for (let i = 0; i < Math.min(created.widgets.length, nd.widgets_values.length); i++) {
+        const v = nd.widgets_values[i]; if (v == null) continue;
+        if (typeof v === 'string' && isTextWidget(created.widgets[i])) await typeInWidget(created, i, v);
+        else if (created.widgets[i].type === 'combo') {
+          if (created.widgets[i].name === 'control_after_generate') await selectControlAfterGenerate(created, i, v);
+          else await selectComboViaUI(created, i, v);
+        } else await clickWidget(created, i, v);
+      }
+    }
+    if (nd.properties) Object.assign(created.properties, nd.properties);
+    app.canvas.setDirty(true,true);
+  }
+
+  async function placeSingleClone(nd, info, sx, sy) {
+    const origRefId = refs[info.originalId];
+    const original = origRefId != null ? app.graph.getNodeById(origRefId) : null;
+    if (!original) return null;
+    // Pan/move cursor to the original, click-select it.
+    const ocx = original.pos[0] + (original.size?.[0]||210)/2;
+    const ocy = original.pos[1] + (original.size?.[1]||80)/2;
+    if (USE_CAMERA_PAN) await panTo(ocx, ocy, 400);
+    const op = c2s(ocx, ocy);
+    await moveTo(op.x, op.y, 350);
+    ripple();
+    selectNodes([original]);
+    await slp(200);
+    const pasted = await copyPasteSelection();
+    if (!pasted.length) return null;
+    const created = pasted[0];
+    // Position at target
+    created.pos = [nd.pos[0], nd.pos[1]];
+    if (nd.size) created.size = [nd.size[0], nd.size[1]];
+    if (nd.title && nd.title !== nd.type) created.title = nd.title;
+    app.canvas.setDirty(true, true);
+    await slp(150);
+    // Move cursor to the new spot so the next step starts from there.
+    await moveTo(sx, sy, 400);
+    await applyWidgetDiffs(created, info.widgetDiffs);
+    return created;
+  }
+
+  async function placeClusterClone(triggerNd, info) {
+    // Resolve the original cluster's runtime nodes
+    const originals = info.originalIds
+      .map(id => refs[id] != null ? app.graph.getNodeById(refs[id]) : null)
+      .filter(Boolean);
+    if (originals.length !== info.originalIds.length) return null;
+
+    // Marquee-select the original cluster
+    const cBox = nodesBoundingCanvas(originals);
+    const padCv = 24;
+
+    // Frame both the original cluster AND its destination region together
+    // so the viewer sees the copy and the paste-target in the same shot.
+    const targetCloneNodes = info.cloneIds.map(cid => NODES.find(n => n.id === cid)).filter(Boolean);
+    if (targetCloneNodes.length) {
+      let x0=cBox.x, y0=cBox.y, x1=cBox.x+cBox.w, y1=cBox.y+cBox.h;
+      for (const cn of targetCloneNodes) {
+        x0 = Math.min(x0, cn.pos[0]);
+        y0 = Math.min(y0, cn.pos[1]);
+        x1 = Math.max(x1, cn.pos[0] + (cn.size?.[0]||210));
+        y1 = Math.max(y1, cn.pos[1] + (cn.size?.[1]||80));
+      }
+      await fitToBox({ x:x0, y:y0, w:x1-x0, h:y1-y0 }, 100, 500);
+    } else if (USE_CAMERA_PAN) {
+      await panTo(cBox.x + cBox.w/2, cBox.y + cBox.h/2, 500);
+    }
+    const tl = c2s(cBox.x - padCv, cBox.y - padCv);
+    const br = c2s(cBox.x + cBox.w + padCv, cBox.y + cBox.h + padCv);
+    await moveTo(tl.x, tl.y, 350);
+    await drawMarquee({ x: Math.min(tl.x,br.x), y: Math.min(tl.y,br.y), w: Math.abs(br.x-tl.x), h: Math.abs(br.y-tl.y) }, 400);
+    selectNodes(originals);
+    await slp(200);
+
+    const pasted = await copyPasteSelection();
+    if (pasted.length < originals.length) {
+      console.warn('Cluster paste produced fewer nodes than expected:', pasted.length, '/', originals.length);
+      return null;
+    }
+    // Pair pasted nodes back to original cluster slots by type+order.
+    // Paste typically preserves order; if not, fall back to type-bucket FIFO.
+    const pairing = new Map(); // originalId -> pastedNode
+    const usedPasted = new Set();
+    const pastedByType = new Map();
+    for (const p of pasted) {
+      if (!pastedByType.has(p.type)) pastedByType.set(p.type, []);
+      pastedByType.get(p.type).push(p);
+    }
+    for (let i = 0; i < info.originalIds.length; i++) {
+      const origId = info.originalIds[i];
+      const origRuntime = app.graph.getNodeById(refs[origId]);
+      if (!origRuntime) continue;
+      const bucket = pastedByType.get(origRuntime.type) || [];
+      const pick = bucket.find(p => !usedPasted.has(p.id));
+      if (pick) { pairing.set(origId, pick); usedPasted.add(pick.id); }
+    }
+
+    // Translate the pasted group: align its bbox top-left to the clone's target bbox top-left.
+    const cloneNodes = info.cloneIds.map(cid => NODES.find(n => n.id === cid)).filter(Boolean);
+    if (cloneNodes.length) {
+      let tx0=Infinity,ty0=Infinity;
+      for (const cn of cloneNodes) {
+        tx0 = Math.min(tx0, cn.pos[0]);
+        ty0 = Math.min(ty0, cn.pos[1]);
+      }
+      let px0=Infinity,py0=Infinity;
+      for (const p of pasted) { px0 = Math.min(px0, p.pos[0]); py0 = Math.min(py0, p.pos[1]); }
+      const dx = tx0 - px0, dy = ty0 - py0;
+      for (const p of pasted) { p.pos = [p.pos[0] + dx, p.pos[1] + dy]; }
+    }
+
+    // Snap each paired node to its clone's exact target pos/size, then refs[].
+    for (const [origId, p] of pairing) {
+      const cloneId = info.idMap[origId];
+      if (cloneId == null) continue;
+      const cloneNd = NODES.find(n => n.id === cloneId);
+      if (cloneNd) {
+        p.pos = [cloneNd.pos[0], cloneNd.pos[1]];
+        if (cloneNd.size) p.size = [cloneNd.size[0], cloneNd.size[1]];
+        if (cloneNd.title && cloneNd.title !== cloneNd.type) p.title = cloneNd.title;
+      }
+      refs[cloneId] = p.id;
+    }
+    app.canvas.setDirty(true, true);
+    await slp(200);
+
+    // Apply widget diffs per node, in cluster order.
+    for (const origId of info.originalIds) {
+      const cloneId = info.idMap[origId];
+      const p = cloneId != null ? app.graph.getNodeById(refs[cloneId]) : null;
+      if (!p) continue;
+      const diffs = info.widgetDiffs[origId];
+      if (diffs && diffs.length) {
+        const cx2 = p.pos[0] + (p.size?.[0]||210)/2;
+        const cy2 = p.pos[1] + (p.size?.[1]||80)/2;
+        const sp = c2s(cx2, cy2);
+        await moveTo(sp.x, sp.y, 300);
+        await applyWidgetDiffs(p, diffs);
+      }
+    }
+    return pasted;
+  }
+
+  const total=NODES.length+LINKS.length;let step=0;const refs={};const connectedLinks=new Set();
+  try{
+    if(app.api&&app.api.clearItems){ await app.api.clearItems('history'); await app.api.clearItems('queue'); }
+    else{ await fetch('/history',{method:'POST',body:JSON.stringify({clear:true})}); await fetch('/queue',{method:'POST',body:JSON.stringify({clear:true})}); }
+  }catch(e){}
+  log(0,total,'🧹 Clearing canvas...');app.graph.clear();app.canvas.setDirty(true,true);await slp(DLY);
+
+  for(const nd of NODES){
+    if(window.__replayStop)break;step++;
+
+    // Humanistic-mode shortcuts: skip nodes already placed by an
+    // earlier cluster-paste; trigger cluster paste on the trigger node;
+    // single-clone copy/paste when the original is ready.
+    if (USE_HUMANISTIC && skipPlacement.has(nd.id) && refs[nd.id] != null) {
+      log(step,total,'⤵︎ (already pasted) '+nd.title+' ('+nd.type+')');
+      // Connect any links touching this node before moving on.
+      // (Falls through to the connection block below.)
+    } else if (USE_HUMANISTIC && clusterByTriggerId.has(nd.id)) {
+      const info = clusterByTriggerId.get(nd.id);
+      const ready = info.originalIds.every(id => refs[id] != null);
+      if (ready) {
+        log(step,total,'🧬 Cluster paste → '+info.cloneIds.length+' nodes');
+        recStep('Cluster paste: '+nd.title);
+        const ok = await placeClusterClone(nd, info);
+        if (!ok) {
+          // Fall back to per-node creation.
+          log(step,total,'   ⚠️ Cluster paste failed, rebuilding '+nd.type);
+          const ncx=nd.pos[0]+nd.size[0]/2,ncy=nd.pos[1]+nd.size[1]/2;
+          if(USE_CAMERA_PAN) await panTo(ncx,ncy,500);
+          const sp=c2s(ncx,ncy);await moveTo(sp.x,sp.y,500);await slp(200);
+          const created = await addViaSearchDialog(nd, sp.x, sp.y);
+          if (created) { refs[nd.id] = created.id; await finishCreatedNode(created, nd); }
+        }
+      } else {
+        // Originals aren't all in yet — build this one fresh.
+        const ncx=nd.pos[0]+nd.size[0]/2,ncy=nd.pos[1]+nd.size[1]/2;
+        if(USE_CAMERA_PAN) await panTo(ncx,ncy,500);
+        const sp=c2s(ncx,ncy);await moveTo(sp.x,sp.y,500);await slp(200);
+        log(step,total,'➕ '+nd.title+' ('+nd.type+')');
+        const created = await addViaSearchDialog(nd, sp.x, sp.y);
+        if (created) { refs[nd.id] = created.id; await finishCreatedNode(created, nd); }
+      }
+    } else if (USE_HUMANISTIC && cloneByCloneId.has(nd.id) && refs[cloneByCloneId.get(nd.id).originalId] != null) {
+      const info = cloneByCloneId.get(nd.id);
+      log(step,total,'📋 Copy-paste clone of '+info.originalId+' → '+nd.title);
+      recStep('Clone: '+nd.title);
+      const ncx=nd.pos[0]+nd.size[0]/2,ncy=nd.pos[1]+nd.size[1]/2;
+      const sp=c2s(ncx,ncy);
+      const created = await placeSingleClone(nd, info, sp.x, sp.y);
+      if (created) { refs[nd.id] = created.id; if (nd.properties) Object.assign(created.properties, nd.properties); }
+      else {
+        log(step,total,'   ⚠️ Clone failed, rebuilding '+nd.type);
+        if(USE_CAMERA_PAN) await panTo(ncx,ncy,500);
+        await moveTo(sp.x,sp.y,500);await slp(200);
+        const fresh = await addViaSearchDialog(nd, sp.x, sp.y);
+        if (fresh) { refs[nd.id] = fresh.id; await finishCreatedNode(fresh, nd); }
+      }
+    } else {
+    log(step,total,'➕ '+nd.title+' ('+nd.type+')');
+    recStep('Node: '+nd.title);
+    const ncx=nd.pos[0]+nd.size[0]/2,ncy=nd.pos[1]+nd.size[1]/2;
+    if(USE_CAMERA_PAN) await panTo(ncx,ncy,500);
+    const sp=c2s(ncx,ncy);await moveTo(sp.x,sp.y,500);await slp(200);
+    const created = await addViaSearchDialog(nd, sp.x, sp.y);
+    if(!created) log(step,total,'   ⚠️ Could not create: '+nd.type);
+    if(created){
+      const hasTargetSize = nd.size && typeof nd.size[0] === 'number' && typeof nd.size[1] === 'number';
+      // Capture default size BEFORE we set anything — used by the
+      // optional resize animation. Cheap whether or not we animate.
+      const defaultSize = [created.size[0], created.size[1]];
+      created.pos=[nd.pos[0],nd.pos[1]];
+      if(nd.title!==nd.type)created.title=nd.title;
+      if (USE_NODE_RESIZE && hasTargetSize) {
+        // Resolve the configured start size relative to the target.
+        const tgt = [nd.size[0], nd.size[1]];
+        let startSize;
+        if      (RESIZE_START === 'zero')    startSize = [1, 1];
+        else if (RESIZE_START === 'quarter') startSize = [tgt[0]/4, tgt[1]/4];
+        else if (RESIZE_START === 'half')    startSize = [tgt[0]/2, tgt[1]/2];
+        else                                  startSize = defaultSize;
+        app.canvas.setDirty(true,true);await slp(50);
+        await animateResize(created, startSize, tgt, RESIZE_DURATION, RESIZE_EASING);
+      } else {
+        // Original snap behavior.
+        if (hasTargetSize) created.size = [nd.size[0], nd.size[1]];
+        app.canvas.setDirty(true,true);await slp(50);
+      }
+      if(nd.widgets_values&&created.widgets){
+        for(let i=0;i<Math.min(created.widgets.length,nd.widgets_values.length);i++){
+          const v=nd.widgets_values[i];if(v==null)continue;
+          // Text widgets get char-by-char typing animation.
+          // Combo widgets get the real DOM dropdown animation
+          // (cursor → click → option click) when the node is
+          // Vue-rendered. Other widgets fall through to a quick
+          // hover-and-set visit.
+          if(typeof v==='string'&&isTextWidget(created.widgets[i])){await typeInWidget(created,i,v);}
+          else if(created.widgets[i].type==='combo'){
+            // control_after_generate is a Reka popover with radio
+            // buttons, not a regular PrimeVue Select. Route it to
+            // a dedicated handler.
+            if(created.widgets[i].name==='control_after_generate'){
+              await selectControlAfterGenerate(created,i,v);
+            } else {
+              await selectComboViaUI(created,i,v);
+            }
+          }
+          else{await clickWidget(created,i,v);}
+        }
+      }
+      if(nd.properties)Object.assign(created.properties,nd.properties);
+      refs[nd.id]=created.id;app.canvas.setDirty(true,true);
+    }
+    }
+    label(nd.title, (DLY + 500) * 0.5, false);
+    let stepDly = DLY * 0.5;
+
+    // AI Narration Timing — when USE_AI_TIMING is on, hold each beat for the
+    // REAL VO clip duration (measured by ffprobe server-side, prefetched into
+    // VO_AUDIO). Falls back to word-count estimate if VO prefetch failed.
+    if (USE_AI_TIMING && NARRATIONS && NARRATIONS[nd.id]) {
+      const msg = NARRATIONS[nd.id];
+      const vo  = VO_AUDIO[nd.id];
+      const speechTime = vo
+        ? Math.max(DLY, vo.durationMs)                     // real clip duration
+        : (msg.split(' ').length / 2.5) * 1000;            // fallback: 150 WPM estimate
+      label(msg, speechTime + 1000, true);
+      // Tag this beat so the server muxes its audio at the current recording offset.
+      // Audio starts immediately — no pre-padding — so it tracks the action.
+      recStep('Beat: '+nd.title, nd.id);
+      if (vo) playVO(nd.id);
+      stepDly = speechTime;
+      console.log('%c🎙️ Narration: ' + msg, 'color:#fcd34d;');
+    }
+
+    await slp(stepDly);
+    // Tiny breather between beats (was DLY = 1000ms; was creating dead air)
+    if (USE_AI_TIMING && NARRATIONS && NARRATIONS[nd.id]) await slp(150);
+
+    // Connect any links where both nodes now exist
+    for(let li=0;li<LINKS.length;li++){
+      if(window.__replayStop)break;
+      if(connectedLinks.has(li))continue;
+      const lk=LINKS[li];
+      if(refs[lk.srcId]==null||refs[lk.tgtId]==null)continue;
+      // Cluster-internal wires came along with paste — mark them
+      // connected and skip the visible drag, but only after the
+      // target cluster has actually been pasted (refs set).
+      if (USE_HUMANISTIC && internalLinkSet.has(li)) {
+        connectedLinks.add(li);
+        continue;
+      }
+      connectedLinks.add(li);step++;
+      const sn=app.graph.getNodeById(refs[lk.srcId]),tn=app.graph.getNodeById(refs[lk.tgtId]);
+      if(!sn||!tn)continue;
+      // Translate workflow-JSON slot indices to runtime slot indices.
+      // For autogrow / widget-as-input nodes the indices differ — see
+      // resolveSlot() above and discussion in conversation history.
+      const srcSlotIdx = resolveSlot(sn, false, lk.srcSlot, lk.srcSlotName);
+      const tgtSlotIdx = resolveSlot(tn, true,  lk.tgtSlot, lk.tgtSlotName);
+      log(step,total, '🔗 '+(sn.title||sn.type)+'['+srcSlotIdx+'] → '+(tn.title||tn.type)+'['+tgtSlotIdx+']');
+      // Per-link VO id matches the key shape used in NARRATIONS / preview UI.
+      const linkVoId = 'link_'+lk.srcId+'_'+lk.srcSlot+'_'+lk.tgtId+'_'+lk.tgtSlot;
+      const linkVo   = (USE_AI_TIMING && VO_AUDIO[linkVoId]) || null;
+      recStep('Link: '+sn.title+' -> '+tn.title, linkVoId);
+      if (linkVo) playVO(linkVoId);
+      const midX=(sn.pos[0]+tn.pos[0])/2,midY=(sn.pos[1]+tn.pos[1])/2;
+      if(USE_CAMERA_PAN) await panTo(midX,midY,400);
+      const sp2=new Float32Array(2),tp2=new Float32Array(2);
+      sn.getConnectionPos(false,srcSlotIdx,sp2);tn.getConnectionPos(true,tgtSlotIdx,tp2);
+      // ComfyCloud's Vue frontend renders the slot circle below where
+      // getConnectionPos reports. Empirically the visual circle sits
+      // ~NODE_SLOT_HEIGHT/2 lower in canvas coords, so the wire emerges
+      // there. Bias our trail endpoints by that amount so the trail
+      // lines up with the wire instead of floating above it.
+      const SLOT_Y_FIX = (typeof LiteGraph !== 'undefined' ? LiteGraph.NODE_SLOT_HEIGHT : 20) / 2;
+      const ss=c2s(sp2[0],sp2[1]+SLOT_Y_FIX),ts=c2s(tp2[0],tp2[1]+SLOT_Y_FIX);
+      await dragTo(ss.x,ss.y,ts.x,ts.y,600);await slp(50);
+      sn.connect(srcSlotIdx,tn,tgtSlotIdx);app.canvas.setDirty(true,true);
+      // Hold for VO duration if present, else the original short delay.
+      await slp(linkVo ? Math.max(DLY, linkVo.durationMs) : DLY*0.3);
+    }
+    if (USE_CAMERA_ZOOM && USE_CAMERA_PAN) await cameraTo(nd.pos[0]+nd.size[0]/2, nd.pos[1]+nd.size[1]/2, 1.0, 500); // zoom back out after each node/link set
+    // Auto-fit: re-frame to all placed nodes so the graph never drifts off-screen.
+    // Runs after the per-node camera-zoom reset above so it has the last word.
+    if (USE_AUTO_FIT) {
+      const box = placedNodesBox();
+      if (box) await fitToBox(box, 100, 450);
+    }
+    await slp(stepDly * 0.5);
+  }
+
+  // ── Zoom to Fit ─────────────────────────────────────────────
+  if (!${skipZoom}) {
+    console.log('%c📐 Zooming to fit workflow...','color:#00d4ff;font-weight:bold;');
+    const zoomEvent=new KeyboardEvent('keydown',{key:'.',code:'Period',keyCode:190,bubbles:true});
+    document.dispatchEvent(zoomEvent);window.dispatchEvent(zoomEvent);
+    await slp(800);
+  }
+
+  // ── Click Run / Queue Prompt ────────────────────────────────
+  if (!${skipQueue}) {
+    console.log('%c▶️ Clicking Run...','color:#00d4ff;font-weight:bold;');
+    const runBtn=document.querySelector('[data-testid="queue-button"]')||document.querySelector('button.comfyui-button.primary')||document.querySelector('#queue-button')||document.querySelector('button[title="Queue Prompt"]')||[...document.querySelectorAll('button')].find(b=>/queue|run/i.test(b.textContent)||/queue|run/i.test(b.title||''));
+    if(runBtn){
+      console.log('%c✅ Found Run button:','color:#00ff88;',runBtn);
+      const bR=runBtn.getBoundingClientRect();const bX=bR.left+bR.width/2,bY=bR.top+bR.height/2;
+      await moveTo(bX,bY,500);await slp(300);
+      ripple('rgba(0,255,136,.6)');
+      runBtn.click();
+      console.log('%c⏳ Workflow queued! Waiting for execution...','color:#fcd34d;font-weight:bold;');
+    }else{
+      console.log('%c⚙️ No Run button found, queuing via API...','color:#888;');
+      try{await app.queuePrompt(0,1);}catch(e){try{const p=await app.graphToPrompt();await fetch('/prompt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:p.output})});}catch(e2){console.warn('⚠️ Could not trigger execution:',e2.message);}}
+      console.log('%c⏳ Waiting for execution...','color:#fcd34d;font-weight:bold;');
+    }
+  }
+
+  // ── Wait for Execution ──────────────────────────────────────
+  await moveTo(window.innerWidth/2,window.innerHeight/2,400);
+  const maxWait=5*60*1000,pollStart=Date.now();let execDone=false;
+  while(Date.now()-pollStart<maxWait&&!window.__replayStop){await slp(500);
+    const appRunning=app.runningNodeId!=null;
+    const hasOut=document.querySelectorAll('.comfyui-image-preview img,.preview-image img').length>0;
+    if(!appRunning&&hasOut){execDone=true;break;}
+    if(Date.now()-pollStart>3000&&!appRunning){await slp(2000);execDone=true;break;}
+  }
+  if(execDone)console.log('%c✅ Execution complete!','color:#00ff88;font-size:14px;font-weight:bold;');
+  else console.log('%c⏰ Execution wait timed out.','color:#fcd34d;font-weight:bold;');
+  await slp(2000);
+
+  // ── Cleanup & Save Recording ────────────────────────────────
+  console.log('%c✅ Replay complete! '+NODES.length+' nodes, '+LINKS.length+' connections.','color:#00ff88;font-size:14px;font-weight:bold;');
+  cur.style.transition='opacity .5s';cur.style.opacity='0';await slp(600);
+  cur.remove();ov.remove();sty.remove();
+  if(recWs && recWs.readyState === 1){
+    logD('Sending stop to record server...', '#fca5a5');
+    recWs.send(JSON.stringify({type:'stop'}));
+    await new Promise(resolve => {
+      recWs.onmessage = (evt) => {
+        try {
+          const msg = JSON.parse(evt.data);
+          if(msg.type === 'done') {
+            logD('Recording saved by server: '+msg.file, '#00ff88');
+            if(msg.xml) logD('FCPXML saved: '+msg.xml, '#fcd34d');
+            console.log('%c🎥 Recording saved! Check recordings/ folder.','color:#00ff88;font-size:14px;font-weight:bold;');
+            if(msg.file) console.log('%c   Video: '+msg.file,'color:#00d4ff;');
+            if(msg.xml) console.log('%c   XML:   '+msg.xml,'color:#ff9900;');
+
+            const ovly = document.createElement('div');
+            Object.assign(ovly.style, {
+              position:'fixed', top:'50%', left:'50%', transform:'translate(-50%,-50%)',
+              background:'#1e1e1e', padding:'30px', borderRadius:'16px', boxShadow:'0 20px 50px rgba(0,0,0,0.8)',
+              zIndex:'999999', textAlign:'center', color:'#fff', fontFamily:'sans-serif', border:'1px solid #333'
+            });
+            let info = '<h2 style="margin:0 0 20px 0;color:#00ff88;">✅ Replay Complete!</h2>';
+            info += '<div style="font-size:14px;color:#00d4ff;margin-bottom:10px;">Files saved to recordings/ folder:</div>';
+            if(msg.file) info += '<div style="font-size:13px;color:#aaa;margin:4px 0;">🎬 '+msg.file+'</div>';
+            if(msg.xml) info += '<div style="font-size:13px;color:#aaa;margin:4px 0;">📋 '+msg.xml+'</div>';
+            info += '<button id="__rclose" style="margin-top:20px;background:transparent;border:none;color:#aaa;cursor:pointer;text-decoration:underline;">Close</button>';
+            ovly.innerHTML = info;
+            document.body.appendChild(ovly);
+            document.getElementById('__rclose').onclick = () => ovly.remove();
+            resolve();
+          }
+        } catch(e) { resolve(); }
+      };
+      setTimeout(() => { logD('Timeout waiting for server response.', '#ef4444'); resolve(); }, 15000);
+    });
+    recWs.close();
+  }
+
+  // Release single-instance lock so a fresh paste can run immediately.
+  window.__replayRunning = false;
+})();
+      `.trim();
+    }
+
+    // ── Process Replay Script (.js) ─────────────────────────────────────────────
+    function processReplayScript(file) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const src = e.target.result;
+          // Extract NODES, LINKS, NARRATIONS from the generated script
+          const nodesMatch = src.match(/const NODES\s*=\s*(\[.*?\]);/s);
+          const linksMatch = src.match(/const LINKS\s*=\s*(\[.*?\]);/s);
+          const narrMatch = src.match(/const NARRATIONS\s*=\s*(\{.*?\});/s);
+          if (!nodesMatch) throw new Error('Could not find NODES in script');
+          if (!linksMatch) throw new Error('Could not find LINKS in script');
+          const nodes = JSON.parse(nodesMatch[1]);
+          const links = JSON.parse(linksMatch[1]);
+          const narrations = narrMatch ? JSON.parse(narrMatch[1]) : null;
+          if (nodes.length === 0) throw new Error('No nodes found in script');
+
+          // Reconstruct a ComfyUI-style workflow from the simplified NODES/LINKS
+          const workflow = {
+            nodes: nodes.map(n => ({
+              id: n.id, type: n.type, pos: n.pos, size: n.size,
+              title: n.title || n.type, flags: {}, order: 0, mode: 0,
+              inputs: [], outputs: [],
+              properties: n.properties || {},
+              widgets_values: n.widgets_values || []
+            })),
+            links: links.map((lk, i) => [
+              i + 1, lk.srcId, lk.srcSlot, lk.tgtId, lk.tgtSlot, '*'
+            ]),
+            groups: [], config: {}, extra: {}, version: 0.4
+          };
+
+          const displayName = file.name.replace('.js', '.json');
+          const script = generateScript(workflow, delay, displayName, narrations);
+          files.set(displayName, {
+            name: displayName,
+            script,
+            nodeCount: nodes.length,
+            linkCount: links.length,
+            narrations,
+            _rawWorkflow: workflow
+          });
+          activePreviewFile = displayName;
+          renderQueue();
+          showToast('📂 Replay script imported with ' + (narrations ? 'narrations' : 'no narrations') + '!');
+        } catch (err) {
+          console.error('Script import error:', err);
+          showToast('❌ Import failed: ' + err.message);
+        }
+      };
+      reader.readAsText(file);
+    }
+
+    // ── Process File ───────────────────────────────────────────────────────────
+    function processFile(file) {
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        try {
+          const workflow = JSON.parse(e.target.result);
+          const nodes = workflow.nodes || [];
+          const links = workflow.links || [];
+          if (nodes.length === 0) throw new Error('No nodes found');
+          
+          let narrations = null;
+          if (activeImageBase64 && aiKey) {
+            try {
+              showToast('Generating AI tutorial script...');
+              narrations = await callAI(aiProvider, nodes, links, activeImageBase64, activeImageMime, aiKey);
+              showToast('✨ AI Narration ready!');
+            } catch (err) {
+              console.error('AI Error:', err);
+              showToast('AI script failed: ' + err.message);
+            }
+          }
+
+          const script = generateScript(workflow, delay, file.name, narrations);
+          files.set(file.name, { 
+            name: file.name, 
+            script, 
+            nodeCount: nodes.length, 
+            linkCount: links.length, 
+            narrations,
+            _rawWorkflow: workflow 
+          });
+          activePreviewFile = file.name;
+          renderQueue();
+        } catch (err) {
+          files.set(file.name, { name: file.name, error: err.message, script: null });
+          renderQueue();
+        }
+      };
+      reader.readAsText(file);
+    }
+
+    const AI_PROMPT = 'Analyze this ComfyUI workflow JSON and the provided screenshot. For each node, generate a natural 1-sentence tutorial narration explaining its role in THIS specific workflow build. Return ONLY a JSON object mapping node IDs (as string keys) to their narration text. Example: {"1": "First we load our checkpoint...", "2": "Then we set the positive prompt..."}';
+
+    async function callAI(provider, nodes, links, base64, mime, key) {
+      const miniWorkflow = { nodes: nodes.map(n => ({id:n.id, type:n.type, title:n.title})), links };
+      const workflowText = 'Workflow JSON: ' + JSON.stringify(miniWorkflow);
+
+      if (provider === 'google') return callGoogle(base64, mime, key, workflowText);
+      if (provider === 'anthropic') return callAnthropic(base64, mime, key, workflowText);
+      if (provider === 'openai') return callOpenAI(base64, mime, key, workflowText);
+      throw new Error('Unknown provider: ' + provider);
+    }
+
+    // Text-only AI call (no image required) for VO script generation
+    async function callAITextOnly(provider, nodes, links, key) {
+      const miniWorkflow = { nodes: nodes.map(n => ({id:n.id, type:n.type, title:n.title, widgets_values: n.widgets_values?.slice(0, 3)})), links };
+      const voPrompt = 'You are writing a voice-over tutorial script for a ComfyUI workflow animation. For each node in the workflow, write a clear, natural 1-2 sentence narration explaining what this node does and why it is needed in this workflow. Speak as if you are teaching a beginner. Return ONLY a JSON object mapping node IDs (as string keys) to narration text. Example: {"1": "First, we load our Stable Diffusion checkpoint...", "2": "Next, we enter our positive prompt..."}';
+      const workflowText = 'Workflow JSON: ' + JSON.stringify(miniWorkflow);
+
+      if (provider === 'google') {
+        const endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + key;
+        const resp = await fetch(endpoint, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: voPrompt + '\n\n' + workflowText }] }],
+            generationConfig: { response_mime_type: 'application/json' }
+          })
+        });
+        if (!resp.ok) { const err = await resp.json(); throw new Error(err.error?.message || 'Gemini error'); }
+        const data = await resp.json();
+        return JSON.parse(data.candidates?.[0]?.content?.parts?.[0]?.text);
+      } else if (provider === 'anthropic') {
+        const resp = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-20250514', max_tokens: 4096,
+            messages: [{ role: 'user', content: voPrompt + '\n\n' + workflowText }]
+          })
+        });
+        if (!resp.ok) { const err = await resp.json(); throw new Error(err.error?.message || 'Claude error'); }
+        const data = await resp.json();
+        const text = data.content?.[0]?.text || '';
+        const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, text];
+        return JSON.parse(jsonMatch[1].trim());
+      } else if (provider === 'openai') {
+        const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
+          body: JSON.stringify({
+            model: 'gpt-4o', response_format: { type: 'json_object' },
+            messages: [{ role: 'user', content: voPrompt + '\n\n' + workflowText }]
+          })
+        });
+        if (!resp.ok) { const err = await resp.json(); throw new Error(err.error?.message || 'OpenAI error'); }
+        const data = await resp.json();
+        return JSON.parse(data.choices?.[0]?.message?.content);
+      }
+      throw new Error('Unknown provider: ' + provider);
+    }
+
+    async function callGoogle(base64, mime, key, workflowText) {
+      const endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + key;
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [
+            { text: AI_PROMPT },
+            { text: workflowText },
+            { inline_data: { mime_type: mime, data: base64 } }
+          ]}],
+          generationConfig: { response_mime_type: 'application/json' }
+        })
+      });
+      if (!response.ok) { const err = await response.json(); throw new Error(err.error?.message || 'Gemini API error'); }
+      const data = await response.json();
+      return JSON.parse(data.candidates?.[0]?.content?.parts?.[0]?.text);
+    }
+
+    async function callAnthropic(base64, mime, key, workflowText) {
+      // Note: Anthropic API has CORS restrictions — requires a proxy in browser
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': key,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true'
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 4096,
+          messages: [{ role: 'user', content: [
+            { type: 'text', text: AI_PROMPT + '\n\n' + workflowText },
+            { type: 'image', source: { type: 'base64', media_type: mime, data: base64 } }
+          ]}]
+        })
+      });
+      if (!response.ok) { const err = await response.json(); throw new Error(err.error?.message || 'Claude API error'); }
+      const data = await response.json();
+      const text = data.content?.[0]?.text || '';
+      // Extract JSON from possible markdown code block
+      const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, text];
+      return JSON.parse(jsonMatch[1].trim());
+    }
+
+    async function callOpenAI(base64, mime, key, workflowText) {
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + key
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o',
+          response_format: { type: 'json_object' },
+          messages: [{ role: 'user', content: [
+            { type: 'text', text: AI_PROMPT + '\n\n' + workflowText },
+            { type: 'image_url', image_url: { url: 'data:' + mime + ';base64,' + base64 } }
+          ]}]
+        })
+      });
+      if (!response.ok) { const err = await response.json(); throw new Error(err.error?.message || 'OpenAI API error'); }
+      const data = await response.json();
+      return JSON.parse(data.choices?.[0]?.message?.content);
+    }
+
+    // ── Render Queue ───────────────────────────────────────────────────────────
+    // ── Step Preview Generator ─────────────────────────────────────────────────
+    // ── Auto-generate VO narrations from workflow JSON ────────────────────────
+    function generateDefaultNarrations(workflow) {
+      const nodes = workflow.nodes || [];
+      const links = workflow.links || [];
+      const sorted = topoSort(nodes, links);
+      const nodeMap = new Map(nodes.map(n => [n.id, n]));
+      const narrations = {};
+      const ordinal = ['First', 'Next', 'Then', 'Now', 'After that', 'Following that'];
+
+      for (let i = 0; i < sorted.length; i++) {
+        const nd = sorted[i];
+        const title = nd.title || nd.type;
+        const prefix = ordinal[Math.min(i, ordinal.length - 1)];
+        const typeName = nd.type.replace(/([A-Z])/g, ' $1').trim().toLowerCase();
+
+        // Get key widget values for context
+        let detail = '';
+        if (nd.widgets_values && nd.widgets_values.length > 0) {
+          const firstStr = nd.widgets_values.find(v => typeof v === 'string' && v.length > 3 && v.length < 60);
+          if (firstStr) detail = ` with "${firstStr}"`;
+        }
+
+        if (nd.type.includes('Checkpoint') || nd.type.includes('checkpoint')) {
+          narrations[nd.id] = `${prefix}, we add a ${title} node to load our AI model${detail}.`;
+        } else if (nd.type.includes('CLIPText') || nd.type.includes('Prompt')) {
+          const isNeg = (nd.title || '').toLowerCase().includes('neg');
+          narrations[nd.id] = `${prefix}, we create a ${isNeg ? 'negative' : 'positive'} prompt node${detail}.`;
+        } else if (nd.type.includes('KSampler') || nd.type.includes('sampler')) {
+          narrations[nd.id] = `${prefix}, we add the ${title} node which handles the diffusion sampling process${detail}.`;
+        } else if (nd.type.includes('VAE') || nd.type.includes('Decode')) {
+          narrations[nd.id] = `${prefix}, we add a ${title} node to decode the latent image into pixels.`;
+        } else if (nd.type.includes('Save') || nd.type.includes('Preview')) {
+          narrations[nd.id] = `${prefix}, we add a ${title} node to save or preview our generated output${detail}.`;
+        } else if (nd.type.includes('LoRA') || nd.type.includes('Lora')) {
+          narrations[nd.id] = `${prefix}, we load a LoRA model with the ${title} node${detail}.`;
+        } else if (nd.type.includes('ControlNet') || nd.type.includes('controlnet')) {
+          narrations[nd.id] = `${prefix}, we apply ControlNet guidance using the ${title} node${detail}.`;
+        } else if (nd.type.includes('Latent') || nd.type.includes('Empty')) {
+          narrations[nd.id] = `${prefix}, we create the initial latent space with the ${title} node.`;
+        } else if (nd.type.includes('Upscale') || nd.type.includes('upscale')) {
+          narrations[nd.id] = `${prefix}, we upscale the image using the ${title} node${detail}.`;
+        } else {
+          narrations[nd.id] = `${prefix}, we add the ${title} node to our workflow.`;
+        }
+      }
+      return narrations;
+    }
+
+    // ── Step Preview Generator (two-column with editable narration) ──────────
+    function generateStepPreview(item, fileName) {
+      if (!item._rawWorkflow) return '';
+      const workflow = item._rawWorkflow;
+      const nodes = workflow.nodes || [];
+      const links = workflow.links || [];
+      const sorted = topoSort(nodes, links);
+      const nodeMap = new Map(nodes.map(n => [n.id, n]));
+      const narrations = item.narrations || {};
+      const safeName = btoa(fileName).replace(/[^a-z0-9]/gi, '');
+
+      // Build connections by target node
+      const connByTgt = new Map();
+      for (const [, srcId, srcSlot, tgtId, tgtSlot] of links) {
+        if (!connByTgt.has(tgtId)) connByTgt.set(tgtId, []);
+        connByTgt.get(tgtId).push({ srcId, srcSlot, tgtId, tgtSlot });
+      }
+
+      // Calculate cumulative timestamps
+      let cumTime = 0;
+      const baseDly = delay;
+      let step = 0;
+      let html = '';
+
+      // Header
+      html += `<div class="preview-header">
+        <div class="preview-header-col col-step">Step</div>
+        <div class="preview-header-col col-script">VO Script</div>
+        <div class="preview-header-col col-time">Time</div>
+      </div>`;
+
+      // Step 0
+      html += `<div class="preview-row node-row">
+        <div class="preview-col-step">
+          <div class="preview-step-badge">0</div>
+          <div class="preview-step-label" style="display:flex;align-items:center;gap:6px;"><i data-lucide="monitor-off" style="width:14px;height:14px;color:#aaa;"></i> Clear canvas</div>
+        </div>
+        <div class="preview-col-script">
+          <textarea class="preview-narration" data-file="${safeName}" data-nodeid="__clear" rows="1" placeholder="Opening narration...">${narrations['__clear'] || ''}</textarea>
+        </div>
+        <div class="preview-col-time">${formatTime(cumTime)}<div class="step-dur">${formatDur(500)}</div></div>
+      </div>`;
+      cumTime += 500;
+
+      // Section: Nodes
+      html += `<div class="preview-row section-row"><div class="preview-section-bar">📦 Nodes</div></div>`;
+
+      for (const nd of sorted) {
+        step++;
+        const title = nd.title || nd.type;
+        const narr = narrations[nd.id] || '';
+        const wordCount = narr ? narr.split(' ').length : 0;
+        const speechMs = narr ? (wordCount / 2.5) * 1000 : 0;
+        const stepTime = useAITiming && narr ? (baseDly + speechMs + baseDly) : baseDly;
+
+        html += `<div class="preview-row node-row">
+          <div class="preview-col-step">
+            <div class="preview-step-badge">${step}</div>
+            <div class="preview-step-label">
+              <i data-lucide="square" style="width:14px;height:14px;color:#aaa;display:inline-block;vertical-align:-2px;margin-right:2px;"></i>
+              <strong>${title}</strong>
+              <span class="step-type">(${nd.type})</span>
+            </div>
+          </div>
+          <button class="delete-step-btn" data-file="${safeName}" data-nodeid="${nd.id}" title="Remove Step"><i data-lucide="x" style="width:14px;height:14px;"></i></button>
+          <div class="preview-col-script">
+            <textarea class="preview-narration" data-file="${safeName}" data-nodeid="${nd.id}" rows="2" placeholder="Narration for this step...">${narr}</textarea>
+          </div>
+          <div class="preview-col-time">${formatTime(cumTime)}<div class="step-dur">${formatDur(stepTime)}</div></div>
+        </div>`;
+        cumTime += stepTime;
+
+        // Connections
+        const conns = connByTgt.get(nd.id) || [];
+        for (const c of conns) {
+          step++;
+          const srcNode = nodeMap.get(c.srcId);
+          const srcName = srcNode ? (srcNode.title || srcNode.type) : 'Node ' + c.srcId;
+          const linkKey = `link_${c.srcId}_${c.srcSlot}_${c.tgtId}_${c.tgtSlot}`;
+          const linkNarr = narrations[linkKey] || '';
+          const linkWords = linkNarr ? linkNarr.split(' ').length : 0;
+          const linkSpeechMs = linkNarr ? (linkWords / 2.5) * 1000 : 0;
+          const linkTime = useAITiming && linkNarr ? (baseDly + linkSpeechMs + baseDly) : 600;
+
+          html += `<div class="preview-row link-row">
+            <div class="preview-col-step">
+              <div class="preview-step-badge">${step}</div>
+              <div class="preview-step-label">
+                <i data-lucide="link" style="width:14px;height:14px;color:#aaa;display:inline-block;vertical-align:-2px;margin-right:2px;flex-shrink:0;"></i>
+                <span style="word-break:break-all;">${srcName}[${c.srcSlot}] <span class="step-arrow">→</span> ${title}[${c.tgtSlot}]</span>
+              </div>
+            </div>
+            <button class="delete-step-btn" data-file="${safeName}" data-linkid="${linkKey}" title="Remove Step"><i data-lucide="x" style="width:14px;height:14px;"></i></button>
+            <div class="preview-col-script">
+              <textarea class="preview-narration" data-file="${safeName}" data-nodeid="${linkKey}" rows="1" placeholder="Connection narration...">${linkNarr}</textarea>
+            </div>
+            <div class="preview-col-time">${formatTime(cumTime)}<div class="step-dur">${formatDur(linkTime)}</div></div>
+          </div>`;
+          cumTime += linkTime;
+        }
+      }
+
+      // Final steps
+      const skipZoom = item.deletedMetaSteps?.includes('__zoom');
+      const skipQueue = item.deletedMetaSteps?.includes('__queue');
+
+      html += `<div class="preview-row section-row"><div class="preview-section-bar" style="display:flex;align-items:center;gap:6px;"><i data-lucide="flag" style="width:14px;height:14px;"></i> Finalize</div></div>`;
+      
+      if (!skipZoom) {
+        html += `<div class="preview-row node-row">
+          <div class="preview-col-step">
+            <div class="preview-step-badge" style="background:transparent;border:1px solid var(--border);color:var(--accent);">-</div>
+            <div class="preview-step-label">
+              <i data-lucide="maximize" style="width:14px;height:14px;color:#aaa;display:inline-block;vertical-align:-2px;margin-right:2px;"></i> Zoom to fit
+            </div>
+          </div>
+          <button class="delete-step-btn" data-file="${safeName}" data-metaid="__zoom" title="Remove Step"><i data-lucide="x" style="width:14px;height:14px;"></i></button>
+          <div class="preview-col-script">
+            <textarea class="preview-narration" data-file="${safeName}" data-nodeid="__zoom" rows="1" placeholder="Zoom narration...">${narrations['__zoom'] || ''}</textarea>
+          </div>
+          <div class="preview-col-time">${formatTime(cumTime)}<div class="step-dur">${formatDur(2000)}</div></div>
+        </div>`;
+        cumTime += 2000;
+      }
+
+      if (!skipQueue) {
+        html += `<div class="preview-row node-row">
+          <div class="preview-col-step">
+            <div class="preview-step-badge" style="background:transparent;border:1px solid var(--border);color:var(--accent);">-</div>
+            <div class="preview-step-label">
+              <i data-lucide="play" style="width:14px;height:14px;color:#aaa;display:inline-block;vertical-align:-2px;margin-right:2px;"></i> Queue & execute
+            </div>
+          </div>
+          <button class="delete-step-btn" data-file="${safeName}" data-metaid="__queue" title="Remove Step"><i data-lucide="x" style="width:14px;height:14px;"></i></button>
+          <div class="preview-col-script">
+            <textarea class="preview-narration" data-file="${safeName}" data-nodeid="__queue" rows="1" placeholder="Queue narration...">${narrations['__queue'] || ''}</textarea>
+          </div>
+          <div class="preview-col-time">${formatTime(cumTime)}</div>
+        </div>`;
+      }
+
+      // Actions bar
+      const hasKey = !!(aiKey || localConfig?.apiKey);
+      const isExample = fileName === 'example-workflow.json' || fileName === 'example-short.json';
+      const showAI = hasKey || isExample;
+      const hasNarr = narrations && Object.keys(narrations).some(k => !k.startsWith('link_') && !k.startsWith('__'));
+      html += `<div class="preview-actions">
+        <button class="btn btn-gen-vo" onclick="autoGenNarrations('${fileName}')" title="Generate from node types (no API needed)" style="display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#f59e0b,#d97706);"><i data-lucide="zap" style="width:14px;height:14px;margin-right:6px;"></i> Quick Script</button>
+        ${showAI ? `<button class="btn btn-gen-vo" onclick="aiGenNarrations('${fileName}')" title="${isExample && !hasKey ? 'Load pre-written AI narrations' : 'Use AI to write better narrations'}" style="display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#7c3aed,#ec4899);"><i data-lucide="bot" style="width:14px;height:14px;margin-right:6px;"></i> AI Script</button>` : ''}
+        ${showAI ? `<button class="btn btn-gen-vo" onclick="aiGenConnNarrations('${fileName}')" title="${isExample && !hasKey ? 'Load pre-written connection narrations' : 'Generate AI narrations for connection steps'}" style="display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#059669,#0891b2);${hasNarr ? '' : 'opacity:0.35;pointer-events:none;'}"${hasNarr ? '' : ' disabled'}><i data-lucide="link" style="width:14px;height:14px;margin-right:6px;"></i> + Connections</button>` : ''}
+        <button class="btn btn-gen-vo" onclick="exportVOScript('${fileName}')" title="Export VO script as .txt file" style="display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#64748b,#475569);${hasNarr ? '' : 'opacity:0.35;pointer-events:none;'}"${hasNarr ? '' : ' disabled'}><i data-lucide="file-text" style="width:14px;height:14px;margin-right:6px;"></i> Export .txt</button>
+        <span style="color:var(--muted);font-size:11px;margin-left:auto;padding-top:4px;">Total: ~${formatTime(cumTime)}</span>
+      </div>`;
+
+      return html;
+    }
+
+    function formatDur(ms) {
+      if (ms < 1000) return ms + 'ms';
+      return (ms / 1000).toFixed(1) + 's';
+    }
+
+    function formatTime(ms) {
+      const s = Math.floor(ms / 1000);
+      const m = Math.floor(s / 60);
+      const sec = s % 60;
+      return m > 0 ? `${m}:${String(sec).padStart(2, '0')}` : `0:${String(sec).padStart(2, '0')}`;
+    }
+
+    // Pre-baked narrations for the example workflow (used when no API key is configured)
+    const EXAMPLE_FALLBACK_NARRATIONS = {
+      "1": "First, we use the Checkpoint Loader Simple node to load our pre-trained Stable Diffusion model, which contains all the necessary weights for generating images.",
+      "2": "This CLIP Text Encode node processes our negative prompt, 'text, watermark', converting it into numerical conditioning. This tells the AI what elements we specifically want to avoid in our final image.",
+      "3": "Similarly, this CLIP Text Encode node processes our positive prompt, describing 'beautiful scenery' and a 'purple galaxy bottle'. This is the core instruction telling the AI what kind of image we want to create.",
+      "4": "The Empty Latent Image node creates a blank canvas of random noise, sized at 512x512 pixels. This serves as the initial starting point that the model will transform into our desired image.",
+      "5": "The KSampler is the main engine of our image generation; it takes all our inputs – the model, prompts, and initial noise – and iteratively denoises the image until it becomes our final output.",
+      "6": "After the KSampler finishes, the VAEDecode node takes the compressed latent image and converts it back into a viewable, high-resolution pixel image. This is how we can actually see and use the image generated by the model.",
+      "7": "Finally, the Save Image node takes our decoded image and saves it to your computer. You can specify the output folder or a file prefix here.",
+      "link_1_1_2_0": "We connect the CLIP model from the Checkpoint Loader to the first CLIP Text Encode node, allowing it to interpret your positive text prompt.",
+      "link_1_1_3_0": "Then, connect the same CLIP model to the second CLIP Text Encode node for processing your negative text prompt.",
+      "link_1_0_5_0": "Next, we connect the core Stable Diffusion model from the Checkpoint Loader to the KSampler, as this model will guide the image generation process.",
+      "link_4_0_5_3": "Connect the initial empty latent image to the KSampler, providing the starting canvas for the image generation process.",
+      "link_3_0_5_1": "We link the positive text conditioning from its CLIP Text Encode node to the KSampler's positive conditioning input.",
+      "link_2_0_5_2": "Likewise, the negative text conditioning is connected to the KSampler's negative conditioning input.",
+      "link_5_0_6_0": "The sampled latent image from the KSampler is then connected to the VAE Decode node to transform it back into a viewable image.",
+      "link_1_2_6_1": "We connect the VAE model from the Checkpoint Loader to the VAE Decode node, providing the necessary model to convert the latent image.",
+      "link_6_0_7_0": "Finally, the decoded image is sent to the Save Image node, allowing you to preview and save your generated output."
+    };
+
+    // Pre-baked narrations for the short example workflow (3 nodes)
+    const EXAMPLE_SHORT_FALLBACK_NARRATIONS = {
+      "1": "First, we use the Checkpoint Loader Simple node to load our base Stable Diffusion model, 'v1-5-pruned-emaonly.ckpt'. This essential step provides the AI with all the knowledge it needs to start generating images based on our prompts.",
+      "2": "Next, we have our first CLIP Text Encode node. Here, we're inputting a negative prompt like 'text, watermark' to tell the AI what we *don't* want to see in our final image, helping us avoid common imperfections.",
+      "3": "This second CLIP Text Encode node is for our positive prompt. We're describing our desired image here – 'beautiful scenery nature glass bottle landscape, purple galaxy bottle' – which the AI will then use as its main instruction for generation.",
+      "link_1_1_2_0": "We connect the CLIP model from the loaded checkpoint to the first CLIP Text Encode node, which will be used to process your positive text prompt.",
+      "link_1_1_3_0": "Next, we connect the same CLIP model to a second CLIP Text Encode node, which will handle the processing of your negative text prompt."
+    };
+
+    window.loadExampleWorkflow = (short = false) => {
+      const exampleJSON = {"id":"00000000-0000-0000-0000-000000000000","revision":0,"last_node_id":7,"last_link_id":9,"nodes":[{"id":2,"type":"CLIPTextEncode","pos":[413,389],"size":[425.27801513671875,180.6060791015625],"flags":{},"order":2,"mode":0,"inputs":[{"localized_name":"clip","name":"clip","type":"CLIP","link":1},{"localized_name":"text","name":"text","type":"STRING","widget":{"name":"text"},"link":null}],"outputs":[{"localized_name":"CONDITIONING","name":"CONDITIONING","type":"CONDITIONING","links":[6]}],"properties":{"Node name for S&R":"CLIPTextEncode"},"widgets_values":["text, watermark"]},{"id":4,"type":"EmptyLatentImage","pos":[473,609],"size":[315,106],"flags":{},"order":0,"mode":0,"inputs":[{"localized_name":"width","name":"width","type":"INT","widget":{"name":"width"},"link":null},{"localized_name":"height","name":"height","type":"INT","widget":{"name":"height"},"link":null},{"localized_name":"batch_size","name":"batch_size","type":"INT","widget":{"name":"batch_size"},"link":null}],"outputs":[{"localized_name":"LATENT","name":"LATENT","type":"LATENT","links":[4]}],"properties":{"Node name for S&R":"EmptyLatentImage"},"widgets_values":[512,512,1]},{"id":5,"type":"KSampler","pos":[863,186],"size":[315,262],"flags":{},"order":4,"mode":0,"inputs":[{"localized_name":"model","name":"model","type":"MODEL","link":3},{"localized_name":"positive","name":"positive","type":"CONDITIONING","link":5},{"localized_name":"negative","name":"negative","type":"CONDITIONING","link":6},{"localized_name":"latent_image","name":"latent_image","type":"LATENT","link":4},{"localized_name":"seed","name":"seed","type":"INT","widget":{"name":"seed"},"link":null},{"localized_name":"steps","name":"steps","type":"INT","widget":{"name":"steps"},"link":null},{"localized_name":"cfg","name":"cfg","type":"FLOAT","widget":{"name":"cfg"},"link":null},{"localized_name":"sampler_name","name":"sampler_name","type":"COMBO","widget":{"name":"sampler_name"},"link":null},{"localized_name":"scheduler","name":"scheduler","type":"COMBO","widget":{"name":"scheduler"},"link":null},{"localized_name":"denoise","name":"denoise","type":"FLOAT","widget":{"name":"denoise"},"link":null}],"outputs":[{"localized_name":"LATENT","name":"LATENT","type":"LATENT","links":[7]}],"properties":{"Node name for S&R":"KSampler"},"widgets_values":[778847685464853,"randomize",20,8,"euler","normal",1]},{"id":6,"type":"VAEDecode","pos":[1209,188],"size":[210,46],"flags":{},"order":5,"mode":0,"inputs":[{"localized_name":"samples","name":"samples","type":"LATENT","link":7},{"localized_name":"vae","name":"vae","type":"VAE","link":8}],"outputs":[{"localized_name":"IMAGE","name":"IMAGE","type":"IMAGE","links":[9]}],"properties":{"Node name for S&R":"VAEDecode"},"widgets_values":[]},{"id":7,"type":"SaveImage","pos":[1451,189],"size":[210,270],"flags":{},"order":6,"mode":0,"inputs":[{"localized_name":"images","name":"images","type":"IMAGE","link":9},{"localized_name":"filename_prefix","name":"filename_prefix","type":"STRING","widget":{"name":"filename_prefix"},"link":null}],"outputs":[],"properties":{},"widgets_values":["ComfyUI"]},{"id":3,"type":"CLIPTextEncode","pos":[415,186],"size":[422.84503173828125,164.31304931640625],"flags":{},"order":3,"mode":0,"inputs":[{"localized_name":"clip","name":"clip","type":"CLIP","link":2},{"localized_name":"text","name":"text","type":"STRING","widget":{"name":"text"},"link":null}],"outputs":[{"localized_name":"CONDITIONING","name":"CONDITIONING","type":"CONDITIONING","links":[5]}],"properties":{"Node name for S&R":"CLIPTextEncode"},"widgets_values":["beautiful scenery nature glass bottle landscape, purple galaxy bottle,"]},{"id":1,"type":"CheckpointLoaderSimple","pos":[26,474],"size":[315,98],"flags":{},"order":1,"mode":0,"inputs":[{"localized_name":"ckpt_name","name":"ckpt_name","type":"COMBO","widget":{"name":"ckpt_name"},"link":null}],"outputs":[{"localized_name":"MODEL","name":"MODEL","type":"MODEL","links":[3]},{"localized_name":"CLIP","name":"CLIP","type":"CLIP","links":[1,2]},{"localized_name":"VAE","name":"VAE","type":"VAE","links":[8]}],"properties":{"Node name for S&R":"CheckpointLoaderSimple"},"widgets_values":["v1-5-pruned-emaonly.ckpt"]}],"links":[[1,1,1,2,0,"CLIP"],[2,1,1,3,0,"CLIP"],[3,1,0,5,0,"MODEL"],[4,4,0,5,3,"LATENT"],[5,3,0,5,1,"CONDITIONING"],[6,2,0,5,2,"CONDITIONING"],[7,5,0,6,0,"LATENT"],[8,1,2,6,1,"VAE"],[9,6,0,7,0,"IMAGE"]],"groups":[],"config":{},"extra":{"ds":{"scale":0.6830134553650705,"offset":[998.6332739135745,243.3337332336428]}},"version":0.4};
+      if (short) {
+        exampleJSON.nodes = exampleJSON.nodes.filter(n => n.id === 1 || n.id === 2 || n.id === 3);
+        const validIds = new Set([1, 2, 3]);
+        exampleJSON.links = exampleJSON.links.filter(l => validIds.has(l[1]) && validIds.has(l[3]));
+      }
+      const blob = new Blob([JSON.stringify(exampleJSON)], { type: 'application/json' });
+      const fileName = short ? 'example-short.json' : 'example-workflow.json';
+      const file = new File([blob], fileName, { type: 'application/json' });
+      processFile(file);
+
+      showToast('📂 Example workflow loaded!');
+    };
+
+    window.exportVOScript = (fileName) => {
+      const item = files.get(fileName);
+      if (!item?._rawWorkflow) return;
+      const workflow = item._rawWorkflow;
+      const nodes = workflow.nodes || [];
+      const links = workflow.links || [];
+      const narrations = item.narrations || {};
+      const useAIT = useAITiming;
+      const baseDly = delay;
+
+      const sorted = [...nodes].sort((a, b) => (a.id - b.id));
+      const nodeMap = new Map(nodes.map(n => [n.id, n]));
+      const connByTgt = new Map();
+      for (const [, , srcId, srcSlot, tgtId, tgtSlot] of links) {
+        if (!connByTgt.has(tgtId)) connByTgt.set(tgtId, []);
+        connByTgt.get(tgtId).push({ srcId, srcSlot, tgtId, tgtSlot });
+      }
+
+      let lines = [];
+      let cumTime = 0;
+      let step = 0;
+
+      lines.push(`VO SCRIPT: ${fileName}`);
+      lines.push(`${'='.repeat(50)}`);
+      lines.push('');
+
+      // Clear canvas
+      step++;
+      lines.push(`[${formatTime(cumTime)}] Step ${step}: 🧹 Clear canvas (500ms)`);
+      if (narrations['__clear']) lines.push(`  "${narrations['__clear']}"`);
+      lines.push('');
+      cumTime += 500;
+
+      lines.push('--- NODES ---');
+      lines.push('');
+
+      for (const nd of sorted) {
+        step++;
+        const title = nd.title || nd.type;
+        const narr = narrations[nd.id] || '';
+        const wordCount = narr ? narr.split(' ').length : 0;
+        const speechMs = narr ? (wordCount / 2.5) * 1000 : 0;
+        const stepTime = useAIT && narr ? (baseDly + speechMs + baseDly) : baseDly;
+
+        lines.push(`[${formatTime(cumTime)}] Step ${step}: ➕ ${title} (${nd.type}) — ${formatDur(stepTime)}`);
+        if (narr) lines.push(`  "${narr}"`);
+        lines.push('');
+        cumTime += stepTime;
+
+        const conns = connByTgt.get(nd.id) || [];
+        for (const c of conns) {
+          step++;
+          const srcNode = nodeMap.get(c.srcId);
+          const srcName = srcNode ? (srcNode.title || srcNode.type) : 'Node ' + c.srcId;
+          const linkKey = `link_${c.srcId}_${c.srcSlot}_${c.tgtId}_${c.tgtSlot}`;
+          const linkNarr = narrations[linkKey] || '';
+          const linkWords = linkNarr ? linkNarr.split(' ').length : 0;
+          const linkSpeechMs = linkNarr ? (linkWords / 2.5) * 1000 : 0;
+          const linkTime = useAIT && linkNarr ? (baseDly + linkSpeechMs + baseDly) : 600;
+
+          lines.push(`[${formatTime(cumTime)}] Step ${step}: 🔗 ${srcName}[${c.srcSlot}] → ${title}[${c.tgtSlot}] — ${formatDur(linkTime)}`);
+          if (linkNarr) lines.push(`  "${linkNarr}"`);
+          lines.push('');
+          cumTime += linkTime;
+        }
+      }
+
+      lines.push('--- FINALIZE ---');
+      lines.push('');
+      lines.push(`[${formatTime(cumTime)}] 📐 Zoom to fit — ${formatDur(2000)}`);
+      if (narrations['__zoom']) lines.push(`  "${narrations['__zoom']}"`);
+      cumTime += 2000;
+      lines.push(`[${formatTime(cumTime)}] ▶️ Queue & execute`);
+      if (narrations['__queue']) lines.push(`  "${narrations['__queue']}"`);
+      lines.push('');
+      lines.push(`${'='.repeat(50)}`);
+      lines.push(`Total Duration: ~${formatTime(cumTime)}`);
+
+      const txt = lines.join('\n');
+      const blob = new Blob([txt], { type: 'text/plain' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = fileName.replace('.json', '') + '-vo-script.txt';
+      a.click();
+      URL.revokeObjectURL(a.href);
+      showToast('📄 VO script exported!');
+    };
+
+    window.autoGenNarrations = (fileName) => {
+      const item = files.get(fileName);
+      if (!item?._rawWorkflow) return;
+      item.narrations = generateDefaultNarrations(item._rawWorkflow);
+      item.script = generateScript(item._rawWorkflow, delay, fileName, item.narrations, item.deletedMetaSteps);
+      activePreviewFile = fileName;
+      renderQueue();
+      showToast('⚡ Quick VO script generated!');
+    };
+
+    window.aiGenNarrations = async (fileName) => {
+      const item = files.get(fileName);
+      if (!item?._rawWorkflow) return;
+      const key = aiKey || localConfig?.apiKey;
+      // Use fallback narrations for examples when no API key
+      const isExample = fileName === 'example-workflow.json' || fileName === 'example-short.json';
+      if (!key && !isExample) { showToast('⚠️ No API key configured'); return; }
+      if (!key && isExample) {
+        const fallback = fileName === 'example-short.json' ? EXAMPLE_SHORT_FALLBACK_NARRATIONS : EXAMPLE_FALLBACK_NARRATIONS;
+        const nodeNarrations = {};
+        Object.entries(fallback).forEach(([k, v]) => { if (!k.startsWith('link_')) nodeNarrations[k] = v; });
+        item.narrations = { ...(item.narrations || {}), ...nodeNarrations };
+        item.script = generateScript(item._rawWorkflow, delay, fileName, item.narrations, item.deletedMetaSteps);
+        activePreviewFile = fileName;
+        renderQueue();
+        showToast('✨ Pre-written AI narrations loaded!');
+        return;
+      }
+      const workflow = item._rawWorkflow;
+      const nodes = workflow.nodes || [];
+      const links = workflow.links || [];
+      try {
+        showToast('🤖 Generating AI narration script...');
+        const narrations = await callAITextOnly(aiProvider, nodes, links, key);
+        item.narrations = { ...(item.narrations || {}), ...narrations };
+        item.script = generateScript(item._rawWorkflow, delay, fileName, item.narrations, item.deletedMetaSteps);
+        activePreviewFile = fileName;
+        renderQueue();
+        showToast('✨ AI VO script ready!');
+      } catch (err) {
+        console.error('AI VO Error:', err);
+        showToast('❌ AI generation failed: ' + err.message);
+      }
+    };
+
+    window.aiGenConnNarrations = async (fileName) => {
+      const item = files.get(fileName);
+      if (!item?._rawWorkflow) return;
+      const key = aiKey || localConfig?.apiKey;
+      const isExample = fileName === 'example-workflow.json' || fileName === 'example-short.json';
+      if (!key && !isExample) { showToast('⚠️ No API key configured'); return; }
+      if (!key && isExample) {
+        const fallback = fileName === 'example-short.json' ? EXAMPLE_SHORT_FALLBACK_NARRATIONS : EXAMPLE_FALLBACK_NARRATIONS;
+        const connNarrations = {};
+        Object.entries(fallback).forEach(([k, v]) => { if (k.startsWith('link_')) connNarrations[k] = v; });
+        item.narrations = { ...(item.narrations || {}), ...connNarrations };
+        item.script = generateScript(item._rawWorkflow, delay, fileName, item.narrations, item.deletedMetaSteps);
+        activePreviewFile = fileName;
+        renderQueue();
+        showToast('🔗 Pre-written connection narrations loaded!');
+        return;
+      }
+      const workflow = item._rawWorkflow;
+      const nodes = workflow.nodes || [];
+      const links = workflow.links || [];
+      const nodeMap = new Map(nodes.map(n => [n.id, n]));
+
+      // Build connection descriptions for AI
+      const connDescs = links.map(([, srcId, srcSlot, tgtId, tgtSlot]) => {
+        const src = nodeMap.get(srcId);
+        const tgt = nodeMap.get(tgtId);
+        const srcName = src ? (src.title || src.type) : 'Node ' + srcId;
+        const tgtName = tgt ? (tgt.title || tgt.type) : 'Node ' + tgtId;
+        return { key: `link_${srcId}_${srcSlot}_${tgtId}_${tgtSlot}`, from: srcName, fromSlot: srcSlot, to: tgtName, toSlot: tgtSlot };
+      });
+
+      const prompt = `You are writing voice-over tutorial narrations for the CONNECTION steps in a ComfyUI workflow animation. These are the moments when the user drags a wire from one node's output to another node's input. For each connection, write a clear, natural 1 sentence explaining WHY these nodes need to be connected (what data flows between them). Return ONLY a JSON object mapping connection keys to narration text. Here are the connections:\n${JSON.stringify(connDescs)}`;
+
+      try {
+        showToast('🔗 Generating connection narrations...');
+        let result;
+        if (aiProvider === 'google') {
+          const endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + key;
+          const resp = await fetch(endpoint, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }],
+              generationConfig: { response_mime_type: 'application/json' }
+            })
+          });
+          if (!resp.ok) { const err = await resp.json(); throw new Error(err.error?.message || 'Gemini error'); }
+          const data = await resp.json();
+          result = JSON.parse(data.candidates?.[0]?.content?.parts?.[0]?.text);
+        } else if (aiProvider === 'anthropic') {
+          const resp = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+            body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 4096, messages: [{ role: 'user', content: prompt }] })
+          });
+          if (!resp.ok) { const err = await resp.json(); throw new Error(err.error?.message || 'Claude error'); }
+          const data = await resp.json();
+          const text = data.content?.[0]?.text || '';
+          const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, text];
+          result = JSON.parse(jsonMatch[1].trim());
+        } else {
+          const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
+            body: JSON.stringify({ model: 'gpt-4o', response_format: { type: 'json_object' }, messages: [{ role: 'user', content: prompt }] })
+          });
+          if (!resp.ok) { const err = await resp.json(); throw new Error(err.error?.message || 'OpenAI error'); }
+          const data = await resp.json();
+          result = JSON.parse(data.choices?.[0]?.message?.content);
+        }
+        item.narrations = { ...(item.narrations || {}), ...result };
+        item.script = generateScript(item._rawWorkflow, delay, fileName, item.narrations, item.deletedMetaSteps);
+        activePreviewFile = fileName;
+        renderQueue();
+        showToast('🔗 Connection narrations ready!');
+      } catch (err) {
+        console.error('AI Connection VO Error:', err);
+        showToast('❌ Connection narration failed: ' + err.message);
+      }
+    };
+
+    // ── Render Queue ───────────────────────────────────────────────────────────
+    let activePreviewFile = null;
+
+    function renderQueue() {
+      const list = document.getElementById('queue-list');
+      if (files.size === 0) {
+        list.innerHTML = '<div class="empty-queue">No files yet — drop some workflows above ☝️</div>';
+        showPreviewSidebar(null);
+        return;
+      }
+      list.innerHTML = '';
+      for (const [name, item] of files) {
+        const card = document.createElement('div');
+        card.className = 'file-card';
+        card.id = 'card-' + btoa(name).replace(/[^a-z0-9]/gi, '');
+        const safeId = btoa(name).replace(/[^a-z0-9]/gi, '');
+        const isActive = activePreviewFile === name;
+
+        if (item.error) {
+          card.innerHTML = `
+            <div class="file-icon">❌</div>
+            <div class="file-info">
+              <div class="file-name">${name}</div>
+              <div class="file-meta" style="color:#f87171">${item.error}</div>
+            </div>
+            <span class="file-status status-error">Error</span>
+            <div class="file-actions">
+              <button class="btn btn-remove" onclick="removeFile('${name}')">✕</button>
+            </div>
+          `;
+        } else {
+          card.innerHTML = `
+            <div class="file-icon">${item.narrations ? '<i data-lucide="mic" style="width:18px;height:18px;margin-top:2px;"></i>' : '<i data-lucide="file-text" style="width:18px;height:18px;margin-top:2px;"></i>'}</div>
+            <div class="file-info">
+              <div class="file-name">${name}</div>
+              <div class="file-meta">${item.nodeCount} nodes · ${item.linkCount} links · ${delay}ms delay${item.narrations ? ' · <span style="color:var(--accent)">AI Narrated</span>' : ''}</div>
+            </div>
+            <span class="file-status status-done">Ready</span>
+            <div class="file-actions">
+              <button class="btn btn-copy" id="copy-${safeId}" onclick="copyScript('${name}')">📋 Copy</button>
+              <button class="btn btn-download" onclick="downloadScript('${name}')">⬇ Save</button>
+              <button class="btn btn-remove" onclick="removeFile('${name}')">✕</button>
+            </div>
+          `;
+        }
+        list.appendChild(card);
+      }
+      if (window.lucide) window.lucide.createIcons();
+      // Refresh sidebar if active file still exists
+      if (activePreviewFile && files.has(activePreviewFile)) {
+        showPreviewSidebar(activePreviewFile);
+      }
+    }
+
+    function showPreviewSidebar(fileName) {
+      const sidebar = document.getElementById('preview-sidebar');
+      const empty = document.getElementById('preview-empty');
+      if (!fileName || !files.has(fileName)) {
+        sidebar.style.display = 'none';
+        empty.style.display = 'flex';
+        activePreviewFile = null;
+        return;
+      }
+      activePreviewFile = fileName;
+      const item = files.get(fileName);
+      empty.style.display = 'none';
+      sidebar.style.display = 'block';
+      sidebar.innerHTML = `
+        <div style="position:sticky;top:0;z-index:3;background:var(--surface);padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;">
+          <span style="font-size:18px;display:flex;align-items:center;">${item.narrations ? '<i data-lucide="mic" style="width:18px;height:18px;"></i>' : '<i data-lucide="file-text" style="width:18px;height:18px;"></i>'}</span>
+          <div>
+            <div style="font-weight:600;font-size:14px;">${fileName}</div>
+            <div style="font-size:11px;color:var(--muted);">${item.nodeCount} nodes · ${item.linkCount} links</div>
+          </div>
+        </div>
+        ${generateStepPreview(item, fileName)}
+      `;
+      requestAnimationFrame(() => {
+        autoResizeAll();
+        if (window.lucide) window.lucide.createIcons();
+      });
+    }
+
+    // ── Narration Edit Handler (delegated on sidebar) ────────────────────────
+    function autoResizeTextarea(el) {
+      if (!el) return;
+      el.style.height = 'auto';
+      el.style.height = el.scrollHeight + 'px';
+    }
+
+    function autoResizeAll() {
+      document.querySelectorAll('.preview-narration').forEach(autoResizeTextarea);
+    }
+
+    document.getElementById('preview-sidebar').addEventListener('input', (e) => {
+      if (!e.target.classList.contains('preview-narration')) return;
+      autoResizeTextarea(e.target); // instant resize
+      const nodeId = e.target.dataset.nodeid;
+      if (!activePreviewFile) return;
+      const item = files.get(activePreviewFile);
+      if (!item) return;
+      if (!item.narrations) item.narrations = {};
+      const val = e.target.value.trim();
+      if (val) item.narrations[nodeId] = val;
+      else delete item.narrations[nodeId];
+      clearTimeout(item._editTimer);
+      item._editTimer = setTimeout(() => {
+        item.script = generateScript(item._rawWorkflow, delay, activePreviewFile, item.narrations, item.deletedMetaSteps);
+        // Re-render sidebar to update timestamps, preserving focus
+        const cursorPos = e.target.selectionStart;
+        const focusId = nodeId;
+        showPreviewSidebar(activePreviewFile);
+        const el = document.querySelector(`.preview-narration[data-nodeid="${focusId}"]`);
+        if (el) { el.focus(); el.selectionStart = el.selectionEnd = cursorPos; }
+      }, 400);
+    });
+
+    // Handle delete step buttons
+    document.getElementById('preview-sidebar').addEventListener('click', (e) => {
+      const btn = e.target.closest('.delete-step-btn');
+      if (!btn || !activePreviewFile) return;
+      const item = files.get(activePreviewFile);
+      if (!item || !item._rawWorkflow) return;
+      
+      const nodeId = btn.dataset.nodeid;
+      const linkId = btn.dataset.linkid;
+      
+      if (nodeId) {
+        const nid = parseInt(nodeId, 10);
+        item._rawWorkflow.nodes = item._rawWorkflow.nodes.filter(n => n.id !== nid);
+        // Remove links connected to this node
+        item._rawWorkflow.links = item._rawWorkflow.links.filter(l => l[1] !== nid && l[3] !== nid);
+      } else if (linkId) {
+        // linkKey format: link_srcId_srcSlot_tgtId_tgtSlot
+        const parts = linkId.split('_');
+        const sid = parseInt(parts[1], 10), tid = parseInt(parts[3], 10);
+        item._rawWorkflow.links = item._rawWorkflow.links.filter(l => !(l[1] === sid && l[3] === tid));
+      }
+      
+      item.nodeCount = item._rawWorkflow.nodes.length;
+      item.linkCount = item._rawWorkflow.links.length;
+      item.script = generateScript(item._rawWorkflow, delay, activePreviewFile, item.narrations, item.deletedMetaSteps);
+      renderQueue(); // Update queue UI
+      showPreviewSidebar(activePreviewFile); // Refresh sidebar
+    });
+
+    window.togglePreview = (name) => {
+      if (activePreviewFile === name) {
+        // Deselect
+        showPreviewSidebar(null);
+      } else {
+        showPreviewSidebar(name);
+      }
+      // Update button states
+      for (const [fname] of files) {
+        const sid = btoa(fname).replace(/[^a-z0-9]/gi, '');
+        const btn = document.getElementById('pbtn-' + sid);
+        if (btn) {
+          const isActive = activePreviewFile === fname;
+          btn.classList.toggle('active', isActive);
+          btn.textContent = isActive ? '👁 Editing' : '👁 Preview';
+        }
+      }
+    };
+
+    // ── Actions ────────────────────────────────────────────────────────────────
+    window.copyScript = async (name) => {
+      const item = files.get(name);
+      if (!item?.script) return;
+      await navigator.clipboard.writeText(item.script);
+      const id = 'copy-' + btoa(name).replace(/[^a-z0-9]/gi, '');
+      const btn = document.getElementById(id);
+      if (btn) {
+        btn.textContent = '✅ Copied!';
+        btn.classList.add('copied');
+        setTimeout(() => { btn.textContent = '📋 Copy'; btn.classList.remove('copied'); }, 2000);
+      }
+      showToast(`Copied script for ${name}!`);
+    };
+
+    window.downloadScript = (name) => {
+      const item = files.get(name);
+      if (!item?.script) return;
+      const blob = new Blob([item.script], { type: 'text/javascript' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = name.replace('.json', '') + '-replay.js';
+      a.click();
+    };
+
+    window.removeFile = (name) => {
+      files.delete(name);
+      renderQueue();
+    };
+
+    function showToast(msg) {
+      document.querySelector('.toast')?.remove();
+      const t = document.createElement('div');
+      t.className = 'toast'; 
+      
+      const iconMap = {
+        '📂': 'folder-open', '📄': 'file-text', '⚡': 'zap', '🤖': 'bot',
+        '✨': 'sparkles', '❌': 'x-circle', '🔗': 'link', '⚠️': 'alert-triangle'
+      };
+      let htmlMsg = msg;
+      for (const [emj, id] of Object.entries(iconMap)) {
+        if (msg.includes(emj)) {
+          htmlMsg = htmlMsg.replace(emj, `<i data-lucide="${id}" style="width:16px;height:16px;flex-shrink:0;margin-top:1px;"></i>`);
+          t.style.display = 'flex'; t.style.alignItems = 'flex-start'; t.style.gap = '8px';
+        }
+      }
+      
+      t.innerHTML = htmlMsg;
+      document.body.appendChild(t);
+      if (window.lucide) window.lucide.createIcons({root: t});
+      setTimeout(() => t.remove(), 2500);
+    }
+
+    renderQueue();
+
+    // ── Image Handling ────────────────────────────────────────────────────────
+    const imageZone = document.getElementById('drop-zone');
+    const imagePreview = document.getElementById('image-preview');
+    const imagePromptUI = document.getElementById('drop-prompt');
+    const clearImageBtn = document.getElementById('clear-image');
+    const aiProviderSelect = document.getElementById('ai-provider');
+    const aiKeyInput = document.getElementById('ai-key');
+    const corsNote = document.getElementById('cors-note');
+    const apiKeyHint = document.getElementById('api-key-hint');
+    const aiTimingToggle = document.getElementById('ai-timing-toggle');
+    const cameraPanToggle = document.getElementById('camera-pan-toggle');
+    const mp4Toggle = document.getElementById('mp4-toggle');
+
+    function handleImage(file) {
+      if (!file.type.startsWith('image/')) return;
+      activeImageMime = file.type;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        activeImageBase64 = e.target.result.split(',')[1];
+        imagePreview.src = e.target.result;
+        imagePreview.style.display = 'block';
+        clearImageBtn.style.display = 'block';
+        showToast('Image attached for AI reference');
+      };
+      reader.readAsDataURL(file);
+    }
+
+    clearImageBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      activeImageBase64 = null; activeImageMime = null;
+      imagePreview.style.display = 'none';
+      clearImageBtn.style.display = 'none';
+    });
+
+    window.addEventListener('paste', e => {
+      const item = [...e.clipboardData.items].find(i => i.type.startsWith('image/'));
+      if (item) handleImage(item.getAsFile());
+    });
+
+    // ── Unified Drop Zone Handler ────────────────────────────────────────────
+    const dropZone = document.getElementById('drop-zone');
+    const fileInput = document.getElementById('file-input');
+
+    dropZone.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', (e) => {
+      handleDroppedFiles([...e.target.files]);
+      fileInput.value = '';
+    });
+
+    dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault(); dropZone.classList.add('drag-over');
+    });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault(); dropZone.classList.remove('drag-over');
+      handleDroppedFiles([...e.dataTransfer.files]);
+    });
+
+    function handleDroppedFiles(fileList) {
+      const jsonFiles = fileList.filter(f => f.name.endsWith('.json'));
+      const jsFiles = fileList.filter(f => f.name.endsWith('.js'));
+      const imageFiles = fileList.filter(f => f.type.startsWith('image/'));
+      if (jsonFiles.length > 0) {
+        jsonFiles.forEach(f => processFile(f));
+        showToast(`Processing ${jsonFiles.length} workflow${jsonFiles.length > 1 ? 's' : ''}...`);
+      }
+      if (jsFiles.length > 0) {
+        jsFiles.forEach(f => processReplayScript(f));
+      }
+      if (imageFiles.length > 0) {
+        handleImage(imageFiles[0]);
+      }
+      if (jsonFiles.length === 0 && jsFiles.length === 0 && imageFiles.length === 0) {
+        showToast('Drop .json workflows, .js replay scripts, or image files');
+      }
+    }
+
+    // ── Delay Sync ────────────────────────────────────────────────────────────
+    const delayRange = document.getElementById('delay-range');
+    const delayInput = document.getElementById('delay-input');
+
+    function updateDelay(val) {
+      delay = parseInt(val) || 1000;
+      delayRange.value = delay;
+      delayInput.value = delay;
+      for (const [name, item] of files) {
+        if (item._rawWorkflow) {
+          item.script = generateScript(item._rawWorkflow, delay, name, item.narrations, item.deletedMetaSteps);
+        }
+      }
+      renderQueue();
+    }
+
+    delayRange.addEventListener('input', e => updateDelay(e.target.value));
+    delayInput.addEventListener('input', e => updateDelay(e.target.value));
+
+    // ── AI Provider & Key ─────────────────────────────────────────────────────
+    const keyHints = {
+      google: 'Get a key from <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:var(--accent);text-decoration:none;">AI Studio</a>',
+      anthropic: 'Get a key from <a href="https://console.anthropic.com/settings/keys" target="_blank" style="color:var(--accent);text-decoration:none;">Anthropic Console</a>',
+      openai: 'Get a key from <a href="https://platform.openai.com/api-keys" target="_blank" style="color:var(--accent);text-decoration:none;">OpenAI Platform</a>',
+    };
+
+    function updateProviderUI() {
+      if (apiKeyHint) apiKeyHint.innerHTML = keyHints[aiProvider] || '';
+      if (corsNote) corsNote.style.display = (aiProvider !== 'google') ? 'block' : 'none';
+    }
+    updateProviderUI();
+
+    if (aiProviderSelect) {
+      aiProviderSelect.addEventListener('change', e => {
+        aiProvider = e.target.value;
+        localStorage.setItem('ai_provider', aiProvider);
+        updateProviderUI();
+      });
+    }
+
+    if (aiKeyInput) {
+      aiKeyInput.addEventListener('change', e => {
+        aiKey = e.target.value;
+        localStorage.setItem('ai_key', aiKey);
+      });
+    }
+    cameraPanToggle.addEventListener('change', e => {
+      useCameraPan = e.target.checked;
+      for (const [name, item] of files) {
+        if (item._rawWorkflow) {
+          item.script = generateScript(item._rawWorkflow, delay, name, item.narrations, item.deletedMetaSteps);
+        }
+      }
+      renderQueue();
+    });
+
+    mp4Toggle.addEventListener('change', e => {
+      convertToMp4 = e.target.checked;
+      for (const [name, item] of files) {
+        if (item._rawWorkflow) {
+          item.script = generateScript(item._rawWorkflow, delay, name, item.narrations, item.deletedMetaSteps);
+        }
+      }
+      renderQueue();
+    });
+
+    const cameraZoomToggle = document.getElementById('camera-zoom-toggle');
+    cameraZoomToggle.addEventListener('change', e => {
+      useCameraZoom = e.target.checked;
+      regenerateAll();
+    });
+
+
+    const captionsToggle = document.getElementById('captions-toggle');
+    captionsToggle.addEventListener('change', e => {
+      showCaptions = e.target.checked;
+      regenerateScripts();
+    });
+
+    const nodeResizeToggle = document.getElementById('node-resize-toggle');
+    nodeResizeToggle.addEventListener('change', e => {
+      useNodeResize = e.target.checked;
+      regenerateScripts();
+    });
+
+    const comboUIToggle = document.getElementById('combo-ui-toggle');
+    comboUIToggle.addEventListener('change', e => {
+      useComboUI = e.target.checked;
+      regenerateScripts();
+    });
+
+    const humanisticToggle = document.getElementById('humanistic-toggle');
+    humanisticToggle.addEventListener('change', e => {
+      useHumanistic = e.target.checked;
+      regenerateScripts();
+    });
+
+    const autoFitToggle = document.getElementById('autofit-toggle');
+    autoFitToggle.addEventListener('change', e => {
+      useAutoFit = e.target.checked;
+      regenerateScripts();
+    });
+
+    const typingDelayRange = document.getElementById('typing-delay-range');
+    const typingDelayLabel = document.getElementById('typing-delay-label');
+    typingDelayRange.addEventListener('input', e => {
+      typingDelay = parseInt(e.target.value, 10);
+      typingDelayLabel.textContent = typingDelay + 'ms';
+      regenerateScripts();
+    });
+
+    const resizeDurationSlider = document.getElementById('resize-duration');
+    const resizeDurationLabel = document.getElementById('resize-duration-label');
+    resizeDurationSlider.addEventListener('input', e => {
+      resizeDuration = parseInt(e.target.value, 10);
+      resizeDurationLabel.textContent = resizeDuration + 'ms';
+      regenerateScripts();
+    });
+
+    const resizeEasingSelect = document.getElementById('resize-easing');
+    resizeEasingSelect.addEventListener('change', e => {
+      resizeEasing = e.target.value;
+      regenerateScripts();
+    });
+
+    const resizeStartSelect = document.getElementById('resize-start');
+    resizeStartSelect.addEventListener('change', e => {
+      resizeStart = e.target.value;
+      regenerateScripts();
+    });
+
+    const voCaptionsToggle = document.getElementById('vo-captions-toggle');
+    voCaptionsToggle.addEventListener('change', e => {
+      showVOCaptions = e.target.checked;
+      regenerateScripts();
+    });
+
+    const xmlToggle = document.getElementById('xml-toggle');
+    xmlToggle.addEventListener('change', e => {
+      exportXml = e.target.checked;
+      regenerateScripts();
+    });
+
+    const recordVideoToggle = document.getElementById('record-video-toggle');
+    recordVideoToggle.addEventListener('change', e => {
+      recordVideo = e.target.checked;
+      regenerateScripts();
+    });
+
+    const showDebugLogToggle = document.getElementById('show-debug-log-toggle');
+    showDebugLogToggle.addEventListener('change', e => {
+      showDebugLog = e.target.checked;
+      regenerateScripts();
+    });
+
+    // ── Cursor Controls ──────────────────────────────────────────────────────
+    const cursorStyleSelect = document.getElementById('cursor-style');
+    const cursorSizeRange = document.getElementById('cursor-size');
+    const cursorSizeLabel = document.getElementById('cursor-size-label');
+
+    function regenerateScripts() {
+      for (const [name, item] of files) {
+        if (item._rawWorkflow) {
+          item.script = generateScript(item._rawWorkflow, delay, name, item.narrations, item.deletedMetaSteps);
+        }
+      }
+    }
+
+    function regenerateAll() {
+      regenerateScripts();
+      renderQueue();
+    }
+
+    cursorStyleSelect.addEventListener('change', e => {
+      cursorStyle = e.target.value;
+      regenerateScripts();
+    });
+
+    cursorSizeRange.addEventListener('input', e => {
+      cursorSize = parseInt(e.target.value);
+      cursorSizeLabel.textContent = cursorSize + 'px';
+      regenerateScripts();
+    });
+
+    // ── AI Timing Label Swap ─────────────────────────────────────────────────
+    const delayLabelEl = document.getElementById('delay-label');
+    const delayDescEl = document.getElementById('delay-desc');
+
+    aiTimingToggle.addEventListener('change', e => {
+      useAITiming = e.target.checked;
+      // Swap label/desc
+      if (useAITiming) {
+        delayLabelEl.textContent = 'VO Padding';
+        delayDescEl.textContent = 'Milliseconds of pause before & after each narration';
+      } else {
+        delayLabelEl.textContent = 'Step Delay';
+        delayDescEl.textContent = 'Base milliseconds between each node';
+      }
+      regenerateAll();
+    });
+  </script>
+
+  <!-- Extension bridge — listens for messages from the parent panel and
+       exposes the generator state (workflows, scripts, narrations).
+       The sandboxed iframe is cross-origin to the panel, so postMessage
+       is the only path. -->
+  <script>
+    (function () {
+      const reply = (id, payload) => {
+        try { window.parent.postMessage({ source: 'comfy-replay-gen', id, ...payload }, '*'); } catch (_) {}
+      };
+
+      // Intercept clipboard writes so we can capture what copyScript() emits
+      // (the generator stores its files in a closure-scoped Map; copyScript
+      // is the only way out short of refactoring it).
+      let lastCapturedScript = null;
+      const origClipboardWrite = navigator.clipboard?.writeText?.bind(navigator.clipboard);
+      if (origClipboardWrite) {
+        navigator.clipboard.writeText = async (txt) => {
+          lastCapturedScript = txt;
+          // Sandbox iframes can't access the system clipboard ("Document is
+          // not focused"). We've already captured the script above; swallow
+          // the rejection so it doesn't surface as an "Uncaught in promise"
+          // error in the panel's DevTools console.
+          try { await origClipboardWrite(txt); } catch (_) { /* expected in sandbox */ }
+          return;
+        };
+      }
+
+      window.addEventListener('message', async (ev) => {
+        const msg = ev.data;
+        if (!msg || msg.source !== 'comfy-replay-panel') return;
+
+        if (msg.type === 'list-files') {
+          const cards = [...document.querySelectorAll('button[onclick^="copyScript"]')];
+          const items = cards.map((btn, i) => {
+            const onclick = btn.getAttribute('onclick') || '';
+            const m = onclick.match(/copyScript\(['"]([^'"]+)['"]\)/);
+            return { index: i, name: m ? m[1] : 'workflow-' + i };
+          });
+          reply(msg.id, { type: 'files', items });
+          return;
+        }
+
+        if (msg.type === 'get-script') {
+          const wantName = msg.name || null;
+          let btn;
+          if (wantName) {
+            btn = [...document.querySelectorAll('button[onclick^="copyScript"]')]
+              .find(b => (b.getAttribute('onclick') || '').includes(JSON.stringify(wantName)));
+          }
+          if (!btn) btn = document.querySelector('button[onclick^="copyScript"]');
+          if (!btn) {
+            reply(msg.id, { type: 'script', ok: false, error: 'No workflow loaded yet. Click "Use Example" first or drop a JSON file.' });
+            return;
+          }
+          lastCapturedScript = null;
+          btn.click();
+          await new Promise(r => setTimeout(r, 250));
+          if (!lastCapturedScript) {
+            reply(msg.id, { type: 'script', ok: false, error: 'Copy did not capture (clipboard intercept missed). Try again.' });
+            return;
+          }
+          let narrations = null;
+          try {
+            const m = lastCapturedScript.match(/const\s+NARRATIONS\s*=\s*(\{[\s\S]*?\});/);
+            if (m && m[1] !== 'null') narrations = JSON.parse(m[1]);
+          } catch (_) { /* leave null */ }
+          const onclick = btn.getAttribute('onclick') || '';
+          const fileMatch = onclick.match(/copyScript\(['"]([^'"]+)['"]\)/);
+          const name = fileMatch ? fileMatch[1] : 'workflow.json';
+          reply(msg.id, { type: 'script', ok: true, script: lastCapturedScript, name, narrations });
+          return;
+        }
+
+        if (msg.type === 'click-example') {
+          try { window.loadExampleWorkflow(!!msg.short); }
+          catch (e) { reply(msg.id, { type: 'click-example', ok: false, error: e.message }); return; }
+          reply(msg.id, { type: 'click-example', ok: true });
+          return;
+        }
+
+        if (msg.type === 'click-ai-script') {
+          // Click "AI Script" on the first workflow card to populate narrations.
+          const btn = document.querySelector('button.btn-gen-vo[onclick^="aiGenNarrations"]');
+          if (!btn) { reply(msg.id, { type: 'click-ai-script', ok: false, error: 'no AI Script button visible — drop a workflow first' }); return; }
+          btn.click();
+          reply(msg.id, { type: 'click-ai-script', ok: true });
+          return;
+        }
+
+        if (msg.type === 'set-toggle') {
+          // msg.id is the DOM input id, msg.checked is boolean.
+          const el = document.getElementById(msg.elementId);
+          if (!el) { reply(msg.id, { type: 'set-toggle', ok: false, error: 'no element #' + msg.elementId }); return; }
+          el.checked = !!msg.checked;
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          reply(msg.id, { type: 'set-toggle', ok: true });
+          return;
+        }
+      });
+
+      // Notify parent that we're alive
+      try { window.parent.postMessage({ source: 'comfy-replay-gen', type: 'bridge-ready' }, '*'); } catch (_) {}
+    })();
+  </script>
+</body>
+</html>
