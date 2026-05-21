@@ -130,8 +130,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             target: { tabId: tab.id },
             world: 'MAIN',
             func: () => {
-              // Generator script uses __replayRunning. The MVP runner used
-              // __comfyReplay*. Probe both for compatibility.
               const running = !!(window.__replayRunning || window.__comfyReplayRunning);
               const done    = !!window.__comfyReplayDone || (window.__replayRunning === false && window.app?.graph?._nodes?.length > 0);
               return {
@@ -139,6 +137,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                 done,
                 err: window.__comfyReplayErr || null,
                 nodes: (window.app && window.app.graph && window.app.graph._nodes) ? window.app.graph._nodes.length : -1,
+                // Beat progress exposed by the patched recStep — see panel.js patcher
+                beatIdx:   window.__extBeatIdx || 0,
+                beatLabel: window.__extBeatLabel || null,
               };
             },
           });
