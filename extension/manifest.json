@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "ComfyUI Replay (internal)",
+  "version": "0.1.0",
+  "description": "Build animated Comfy replays with VO — direct from the browser.",
+
+  "permissions": ["sidePanel", "scripting", "activeTab", "tabs", "storage", "tabCapture"],
+  "host_permissions": [
+    "https://cloud.comfy.org/*",
+    "https://api.elevenlabs.io/*"
+  ],
+
+  "background": { "service_worker": "bg.js", "type": "module" },
+
+  "side_panel": { "default_path": "panel.html" },
+  "action":     { "default_title": "Open Replay Generator" },
+
+  "sandbox": {
+    "pages": ["generator.html"]
+  },
+  "content_security_policy": {
+    "sandbox": "sandbox allow-scripts allow-forms allow-modals allow-popups; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://esm.sh https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https: data:; media-src 'self' data: blob:;"
+  },
+
+  "web_accessible_resources": [
+    {
+      "resources": ["audio/*.mp3", "lib/*.js", "generator.html"],
+      "matches": ["https://cloud.comfy.org/*", "<all_urls>"]
+    }
+  ]
+}

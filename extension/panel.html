@@ -1,0 +1,1017 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ComfyUI Replay</title>
+<style>
+  :root {
+    /* ─── Comfy brand palette (verbatim hex from comfy-color SKILL.md) ─── */
+    --comfy-ink:        #211927;   /* primary dark — backgrounds, dark text */
+    --comfy-yellow:     #F2FF59;   /* primary accent — CTAs, focal */
+    --comfy-canvas:     #C2BFB9;   /* neutral mid-tone */
+    --comfy-plum:       #493787;   /* purple accent — expressive states */
+    --comfy-warm-white: #F0EFED;   /* primary text on Ink (AAA) */
+    --comfy-cool-white: #E8EBF2;   /* cool background */
+    --comfy-lilac:      #DBD6F2;   /* soft purple — secondary state */
+    --comfy-mauve:      #4D3762;   /* deep purple — raised surfaces, errors */
+    --comfy-warm-gray:  #7E7C78;   /* mid neutral */
+    --comfy-cool-gray:  #3C3C3C;   /* dark neutral */
+
+    /* ─── Semantic tokens ─── */
+    --bg:        var(--comfy-ink);
+    --bg-2:      #2a2030;                       /* Ink with a touch of Mauve mixed in */
+    --bg-3:      var(--comfy-mauve);            /* raised surfaces, containers */
+    --fg:        var(--comfy-warm-white);       /* body text on Ink (AAA) */
+    --fg-2:      var(--comfy-canvas);           /* secondary text on Ink (AAA) */
+    --muted:     rgba(194, 191, 185, 0.55);     /* Canvas @ 55% — derived muted */
+    --line:      rgba(219, 214, 242, 0.10);     /* Lilac @ 10% — subtle border */
+
+    --accent:        var(--comfy-yellow);
+    --accent-strong: #DDEA4E;                   /* slightly muted Yellow for hover */
+    --accent-text:   var(--comfy-ink);          /* text on Yellow (AA) */
+
+    /* ─── State colors — all from Comfy palette ─── */
+    --state-setup:     var(--comfy-lilac);
+    --state-ready:     var(--comfy-yellow);
+    --state-recording: var(--comfy-plum);
+    --state-saving:    var(--comfy-lilac);
+    --state-done:      var(--comfy-yellow);
+    --state-error:     var(--comfy-mauve);
+
+    --shadow: 0 1px 0 rgba(240, 239, 237, .04) inset, 0 1px 3px rgba(0, 0, 0, .35);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    background: var(--bg); color: var(--fg);
+    margin: 0; padding: 0; height: 100%; overflow: hidden;
+    /* PP Formula first; if not available locally, falls back to a geometric
+       sans-serif stack that approximates Formula's feel. No italics — anywhere.
+       Body baseline is Medium (500) — Comfy's typography register for
+       structured content + UI labels (Narrow Medium per brand). Regular (400)
+       reads too thin against Comfy Ink. */
+    font: 500 13px/1.45 'PP Formula', 'PP Formula Condensed', 'ABC Diatype', 'Söhne', 'Inter',
+                        -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    font-style: normal !important;
+    -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+  }
+  *, *:before, *:after { font-style: normal !important; }
+  /* Bump every utility weight up one notch (400 → 500, 500 → 600, 600 → 700)
+     so the whole panel reads as confident structured display, not light body. */
+  input, select, textarea, button { font-weight: 500; }
+  body { display: flex; flex-direction: column; }
+
+  /* ── Header ─────────────────────────────────────────────────────── */
+  .hdr {
+    flex: 0 0 auto;
+    padding: 12px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--line);
+  }
+  .hdr-title-row {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+  }
+  .hdr-title {
+    font-size: 13px; font-weight: 800; color: var(--fg);
+    letter-spacing: 0.005em;
+  }
+  .hdr-version {
+    font-size: 9.5px; color: var(--comfy-canvas);
+    padding: 2px 6px; background: rgba(194, 191, 185, 0.10);
+    border-radius: 3px; font-weight: 700; letter-spacing: 0.05em;
+  }
+  .hdr-spacer { flex: 1; }
+
+  /* ── State pill — Lilac/Yellow/Plum/Mauve only ──────────────────────
+     Backgrounds for "neutral" states are kept TRANSPARENT on Ink so the
+     yellow text doesn't sit on a yellow tint (low local edge contrast even
+     when the formal pairing is AAA). Only "recording" and "error" use
+     filled containers — those need the visual weight. */
+  .state {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 999px;
+    font-size: 11.5px; font-weight: 700; letter-spacing: 0.02em;
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--fg);
+    transition: background .2s, color .2s, border-color .2s;
+  }
+  .state-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--fg-2); }
+
+  .state[data-status="setup"]     { color: var(--comfy-lilac);  border-color: rgba(219, 214, 242, 0.45); }
+  .state[data-status="setup"]     .state-dot { background: var(--comfy-lilac); animation: pulse 1.2s ease-in-out infinite; }
+
+  .state[data-status="ready"]     { color: var(--comfy-yellow); border-color: rgba(242, 255, 89, 0.55); }
+  .state[data-status="ready"]     .state-dot { background: var(--comfy-yellow); }
+
+  .state[data-status="recording"] {
+    color: var(--comfy-warm-white);
+    border-color: var(--comfy-plum);
+    background: var(--comfy-plum);
+  }
+  .state[data-status="recording"] .state-dot { background: var(--comfy-warm-white); animation: pulse 0.9s ease-in-out infinite; }
+
+  .state[data-status="saving"]    { color: var(--comfy-lilac);  border-color: rgba(219, 214, 242, 0.45); }
+  .state[data-status="saving"]    .state-dot { background: var(--comfy-lilac); animation: pulse 1.2s ease-in-out infinite; }
+
+  .state[data-status="done"]      { color: var(--comfy-yellow); border-color: rgba(242, 255, 89, 0.55); }
+  .state[data-status="done"]      .state-dot { background: var(--comfy-yellow); }
+
+  .state[data-status="error"]     {
+    color: var(--comfy-lilac);
+    border-color: var(--comfy-mauve);
+    background: var(--comfy-mauve);
+  }
+  .state[data-status="error"]     .state-dot { background: var(--comfy-lilac); }
+
+  @keyframes pulse { 50% { opacity: 0.4; } }
+
+  /* ── Tab info ───────────────────────────────────────────────────── */
+  #tab-info {
+    font-size: 11px; color: var(--fg-2);
+    display: flex; align-items: center; gap: 6px;
+    font-weight: 500;
+  }
+  #tab-info b { color: var(--fg); font-weight: 700; }
+  #tab-info .tab-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+  #tab-info.connected .tab-dot { background: var(--comfy-yellow); box-shadow: 0 0 0 2px rgba(242, 255, 89, 0.18); }
+  #tab-info.disconnected .tab-dot { background: var(--comfy-lilac); }
+
+  /* ── Tab switcher — segmented pill bar (per Comfy reference) ────────
+     Inset container with subtle border; inactive tabs are transparent
+     with vertical hairline separators between them; active tab is a
+     filled Yellow pill with Ink text. Active label is uppercased to
+     reinforce the chip-like feel. */
+  .tabs-wrap {
+    flex: 0 0 auto;
+    padding: 8px 12px 10px;
+    background: var(--bg);
+  }
+  .tabs {
+    display: flex;
+    background: rgba(240, 239, 237, 0.04);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 4px;
+    gap: 0;
+  }
+  .tab-btn {
+    flex: 1;
+    background: transparent;
+    border: 0;
+    border-radius: 10px;
+    color: var(--fg-2);
+    padding: 9px 14px;
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 700;
+    letter-spacing: 0.005em;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center; gap: 7px;
+    position: relative;
+    transition: color .15s, background .15s;
+  }
+  /* Hairline separators between inactive tabs (hidden adjacent to active) */
+  .tab-btn + .tab-btn::before {
+    content: '';
+    position: absolute; left: 0; top: 22%; bottom: 22%;
+    width: 1px; background: var(--line);
+    transition: opacity .15s;
+  }
+  .tab-btn.active::before,
+  .tab-btn.active + .tab-btn::before { opacity: 0; }
+
+  .tab-btn:hover:not(.active) {
+    color: var(--comfy-warm-white);
+    background: rgba(240, 239, 237, 0.03);
+  }
+  .tab-btn.active {
+    background: var(--comfy-yellow);
+    color: var(--comfy-ink);
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  }
+  .tab-btn .badge {
+    font-size: 10px; padding: 1px 7px; border-radius: 999px;
+    background: rgba(194, 191, 185, 0.18); color: var(--fg);
+    font-weight: 700; min-width: 18px; text-align: center;
+    letter-spacing: 0;
+  }
+  .tab-btn.active .badge {
+    background: rgba(33, 25, 39, 0.18);  /* Ink @ 18% over the Yellow chip */
+    color: var(--comfy-ink);
+    font-weight: 800;
+    text-transform: none;
+  }
+  .tab-btn[data-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+
+  /* ── Tab content panes ──────────────────────────────────────────── */
+  .tab-pane {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: none;
+    overflow: hidden;
+    flex-direction: column;
+  }
+  .tab-pane.active { display: flex; }
+
+  /* Record pane content */
+  #pane-record {
+    padding: 14px 12px;
+    overflow-y: auto;
+    gap: 10px;
+  }
+  #pane-record > * { margin: 0; }
+  .pane-section { display: flex; flex-direction: column; gap: 8px; }
+  .pane-label {
+    font-size: 10px; color: var(--fg-2);
+    text-transform: uppercase; letter-spacing: 0.06em;
+    font-weight: 800;
+  }
+
+  /* Buttons */
+  button {
+    background: rgba(240, 239, 237, 0.04);
+    color: var(--fg);
+    border: 1px solid var(--line);
+    border-radius: 6px; padding: 7px 12px; cursor: pointer;
+    font: inherit; font-size: 12px; font-weight: 600;
+    transition: background .15s, border-color .15s, color .15s;
+  }
+  button:hover:not(:disabled) {
+    background: rgba(219, 214, 242, 0.08);
+    border-color: rgba(219, 214, 242, 0.25);
+    color: var(--comfy-warm-white);
+  }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Primary Record button — Yellow on Ink, the brand's focal CTA */
+  button.primary {
+    background: var(--comfy-yellow);
+    color: var(--comfy-ink);
+    border-color: var(--comfy-yellow);
+    font-weight: 800;
+    padding: 13px 14px; width: 100%;
+    font-size: 13px; letter-spacing: 0.015em;
+    box-shadow: var(--shadow);
+  }
+  button.primary:hover:not(:disabled) {
+    background: var(--accent-strong);
+    border-color: var(--accent-strong);
+    color: var(--comfy-ink);
+  }
+  button.primary:disabled {
+    background: rgba(242, 255, 89, 0.18);
+    color: rgba(33, 25, 39, 0.5);
+    border-color: rgba(242, 255, 89, 0.18);
+  }
+
+  .btn-row { display: flex; gap: 6px; }
+
+  /* Compact options grid */
+  .opts {
+    display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; align-items: center;
+    font-size: 11px; color: var(--fg-2);
+  }
+  .opts > label { color: var(--fg-2); font-weight: 600; }
+  .opts select {
+    background: rgba(240, 239, 237, 0.04); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 5px;
+    padding: 6px 8px; font: inherit; font-size: 11px; font-weight: 600; width: 100%;
+    cursor: pointer;
+  }
+  .opts select:hover, .opts select:focus {
+    border-color: rgba(219, 214, 242, 0.3);
+    outline: none;
+  }
+
+  /* ── Comfy-branded toggle (Yellow on / neutral off) ──────────────── */
+  .cf-toggle {
+    position: relative; flex: 0 0 auto;
+    width: 32px; height: 18px;
+    background: rgba(194, 191, 185, 0.22);
+    border-radius: 999px; cursor: pointer;
+    transition: background .2s;
+    border: 0; padding: 0;
+  }
+  .cf-toggle::after {
+    content: ''; position: absolute;
+    top: 2px; left: 2px;
+    width: 14px; height: 14px;
+    background: var(--comfy-warm-white);
+    border-radius: 50%;
+    transition: left .2s, background .2s, box-shadow .2s;
+  }
+  .cf-toggle[aria-checked="true"] { background: var(--comfy-yellow); }
+  .cf-toggle[aria-checked="true"]::after {
+    left: 16px; background: var(--comfy-ink);
+  }
+  .cf-toggle:hover { box-shadow: 0 0 0 3px rgba(219, 214, 242, 0.10); }
+  .cf-toggle:focus { outline: 2px solid rgba(242, 255, 89, 0.45); outline-offset: 2px; }
+
+  /* ── Comfy-branded range slider ──────────────────────────────────── */
+  .cf-range {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 20px; background: transparent; margin: 0;
+  }
+  .cf-range::-webkit-slider-runnable-track {
+    height: 3px; background: rgba(219, 214, 242, 0.18);
+    border-radius: 2px;
+  }
+  .cf-range::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--comfy-yellow);
+    margin-top: -5.5px;
+    border: 2px solid var(--comfy-ink);
+    box-shadow: 0 0 0 1px rgba(242, 255, 89, 0.4);
+    cursor: pointer;
+    transition: box-shadow .15s;
+  }
+  .cf-range:hover::-webkit-slider-thumb { box-shadow: 0 0 0 4px rgba(242, 255, 89, 0.2); }
+
+  /* Options list (one row per option) */
+  .cf-options { display: flex; flex-direction: column; gap: 10px; }
+  .cf-opt {
+    display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 10px;
+  }
+  .cf-opt-label {
+    color: var(--fg); font-size: 11.5px; font-weight: 700;
+    letter-spacing: 0.005em;
+  }
+  .cf-opt-desc {
+    color: var(--fg-2); font-size: 10px; margin-top: 2px; line-height: 1.4;
+    font-weight: 500;
+  }
+  .cf-opt-value {
+    color: var(--comfy-yellow); font-size: 10.5px; font-weight: 800;
+    font-variant-numeric: tabular-nums; min-width: 50px; text-align: right;
+    letter-spacing: 0.01em;
+  }
+  .cf-opt-slider {
+    grid-column: 1 / -1; display: grid;
+    grid-template-columns: 1fr auto; gap: 10px; align-items: center;
+  }
+  .cf-opt-select {
+    background: rgba(240, 239, 237, 0.04); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 5px;
+    padding: 4px 8px; font: inherit; font-size: 11px;
+    cursor: pointer;
+  }
+  .cf-opt-select:hover, .cf-opt-select:focus {
+    border-color: rgba(219, 214, 242, 0.3);
+    outline: none;
+  }
+
+  .cf-options-more {
+    margin-top: 4px; padding-top: 8px;
+    border-top: 1px solid var(--line);
+    font-size: 10.5px; color: var(--fg-2); font-weight: 500;
+  }
+  .cf-options-more a {
+    color: var(--comfy-yellow); text-decoration: none; font-weight: 700;
+    cursor: pointer;
+  }
+  .cf-options-more a:hover { text-decoration: underline; }
+
+  /* Collapsible option sections (Video Options / UI Options / etc.) */
+  .cf-section {
+    background: rgba(240, 239, 237, 0.025);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 8px 12px 4px;
+    margin: 0;
+  }
+  .cf-section[open] { padding-bottom: 12px; }
+  .cf-section > summary {
+    cursor: pointer; user-select: none; outline: none;
+    list-style: none;
+    color: var(--fg);
+    font-size: 11px; font-weight: 800;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    padding: 4px 0;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .cf-section > summary::-webkit-details-marker { display: none; }
+  .cf-section > summary::after {
+    content: '▸';
+    color: var(--fg-2); font-size: 10px;
+    transition: transform .15s;
+  }
+  .cf-section[open] > summary::after { transform: rotate(90deg); color: var(--comfy-yellow); }
+  .cf-section > summary:hover { color: var(--comfy-yellow); }
+
+  /* Workflow status + drop zone */
+  .wf-status {
+    background: rgba(240, 239, 237, 0.04);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 8px 10px;
+    display: flex; justify-content: space-between; align-items: baseline;
+    gap: 10px; font-size: 11px;
+  }
+  #wf-name { color: var(--fg); font-weight: 700; letter-spacing: 0.005em; }
+  #wf-meta { color: var(--fg-2); font-size: 10.5px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  /* ── Drop zone — bold, centered, unmistakable as a drop target ──── */
+  .drop-zone {
+    position: relative;
+    border: 2px dashed rgba(219, 214, 242, 0.30);
+    border-radius: 12px;
+    padding: 24px 16px 22px;
+    text-align: center;
+    cursor: pointer;
+    transition: background .15s, border-color .15s, transform .12s;
+    display: flex; flex-direction: column; align-items: center; gap: 10px;
+    background: rgba(219, 214, 242, 0.02);
+  }
+  .drop-zone:hover {
+    background: rgba(219, 214, 242, 0.06);
+    border-color: rgba(219, 214, 242, 0.55);
+  }
+  .drop-zone:active { transform: scale(0.995); }
+  .drop-zone.dragover {
+    background: rgba(242, 255, 89, 0.08);
+    border-color: var(--comfy-yellow);
+    border-style: solid;
+    box-shadow: 0 0 0 4px rgba(242, 255, 89, 0.12);
+  }
+
+  /* Icon in a circle — clear "upload here" affordance */
+  .drop-icon {
+    width: 44px; height: 44px;
+    border-radius: 50%;
+    background: rgba(219, 214, 242, 0.10);
+    color: var(--comfy-lilac);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px; font-weight: 700; line-height: 1;
+    transition: background .15s, color .15s, transform .15s;
+  }
+  .drop-zone:hover .drop-icon {
+    background: rgba(219, 214, 242, 0.16);
+    color: var(--comfy-warm-white);
+  }
+  .drop-zone.dragover .drop-icon {
+    background: var(--comfy-yellow);
+    color: var(--comfy-ink);
+    transform: translateY(-2px);
+  }
+
+  /* Primary headline */
+  .drop-title {
+    color: var(--fg);
+    font-size: 13.5px;
+    font-weight: 800;
+    letter-spacing: 0.005em;
+    line-height: 1.2;
+  }
+  .drop-zone.dragover .drop-title { color: var(--comfy-yellow); }
+
+  /* Secondary line with browse link */
+  .drop-sub {
+    color: var(--fg-2);
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1.4;
+  }
+  .drop-sub a {
+    color: var(--comfy-yellow);
+    text-decoration: underline;
+    text-decoration-thickness: 1.5px;
+    text-underline-offset: 2px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .drop-sub a:hover { text-decoration-thickness: 2px; }
+
+  /* Tertiary hint about the VO Script tab */
+  .drop-hint {
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 10.5px;
+    font-weight: 500;
+  }
+
+  /* Progress card — Mauve container + Yellow progress fill */
+  #progress {
+    padding: 13px;
+    background: var(--comfy-mauve);
+    border: 1px solid rgba(73, 55, 139, 0.6);
+    border-radius: 6px;
+    display: none;
+  }
+  #progress.show { display: block; }
+  #progress-beat {
+    color: var(--comfy-warm-white); font-weight: 700; margin-bottom: 6px;
+    font-size: 12px; letter-spacing: 0.005em;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #progress-meta {
+    color: var(--comfy-lilac); margin-bottom: 8px;
+    display: flex; justify-content: space-between; font-size: 10.5px;
+    font-variant-numeric: tabular-nums; font-weight: 600;
+  }
+  .pbar-track {
+    height: 4px; background: rgba(219, 214, 242, 0.15);
+    border-radius: 2px; overflow: hidden;
+  }
+  .pbar-fill {
+    height: 100%; background: var(--comfy-yellow); width: 0%;
+    transition: width .3s ease-out;
+  }
+
+  /* VO Script pane = iframe taking full pane height */
+  #pane-script { padding: 0; }
+  #gen-frame {
+    flex: 1 1 auto; width: 100%; height: 100%; border: 0;
+    background: var(--bg); display: block;
+  }
+
+  /* ── Bottom: collapsed log + settings ───────────────────────────── */
+  .bottom {
+    flex: 0 0 auto;
+    background: var(--bg);
+    border-top: 1px solid var(--line);
+    padding: 8px 12px 10px;
+  }
+  details summary {
+    cursor: pointer; user-select: none; outline: none;
+    font-size: 11px; color: var(--fg-2); padding: 4px 0;
+    font-weight: 700; letter-spacing: 0.005em;
+  }
+  details summary:hover { color: var(--comfy-warm-white); }
+  details[open] summary { color: var(--comfy-warm-white); margin-bottom: 5px; }
+  #log {
+    font-family: 'PP Formula Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 10.5px; color: var(--fg-2); max-height: 110px;
+    overflow-y: auto; white-space: pre-wrap; line-height: 1.5;
+    font-weight: 500; font-style: normal !important;
+  }
+  /* Log severity colors — only Comfy palette. Bumped to 600/700 weight
+     so colored log lines hold up against the Ink background. */
+  #log .ok   { color: var(--comfy-yellow); font-weight: 700; }
+  #log .warn { color: var(--comfy-lilac);  font-weight: 700; }
+  #log .err  { color: var(--comfy-lilac);  font-weight: 800; }
+  #log .info { color: var(--comfy-canvas); font-weight: 600; }
+
+  .settings-body {
+    display: flex; flex-direction: column; gap: 7px;
+    margin-top: 6px; padding-top: 4px;
+  }
+  .settings-body input[type=text],
+  .settings-body input[type=password] {
+    background: rgba(240, 239, 237, 0.04); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 4px;
+    padding: 6px 8px; font: inherit; font-size: 11px; width: 100%;
+    font-weight: 600; font-style: normal !important;
+  }
+  .settings-body input:focus {
+    outline: none;
+    border-color: rgba(242, 255, 89, 0.45);
+    background: rgba(240, 239, 237, 0.06);
+  }
+  .settings-body label {
+    display: flex; flex-direction: column; gap: 4px;
+    font-size: 10.5px; color: var(--fg-2);
+    text-transform: uppercase; letter-spacing: 0.06em; font-weight: 800;
+  }
+  .settings-body input::placeholder { color: var(--muted); font-style: normal; }
+</style>
+</head>
+<body>
+
+<div class="hdr">
+  <div class="hdr-title-row">
+    <span class="hdr-title">ComfyUI Replay</span>
+    <span class="hdr-version">v0.5</span>
+    <span class="hdr-spacer"></span>
+    <span class="state" id="state-pill" data-status="setup">
+      <span class="state-dot"></span>
+      <span id="state-text">Initializing…</span>
+    </span>
+  </div>
+
+  <div id="tab-info" class="disconnected">
+    <span class="tab-dot"></span>
+    <span id="tab-label">Looking for Comfy tab…</span>
+  </div>
+</div>
+
+<div class="pane-section" style="padding:0 12px;">
+  <div class="btn-row">
+    <button id="btn-record" class="primary" disabled>▶ Record Replay</button>
+  </div>
+  <div class="btn-row" style="gap:4px;">
+    <button id="btn-stop" disabled style="flex:1;">■ Stop</button>
+    <button id="btn-reload" title="Re-run Example setup" style="flex:1;">↻ Reload Example</button>
+  </div>
+</div>
+
+<div class="tabs-wrap">
+  <div class="tabs" role="tablist">
+    <button class="tab-btn active" id="tab-btn-record" data-tab="record" role="tab" aria-selected="true">
+      Record
+    </button>
+    <button class="tab-btn" id="tab-btn-script" data-tab="script" role="tab" aria-selected="false">
+      VO Script <span class="badge" id="script-badge">—</span>
+    </button>
+  </div>
+</div>
+
+<!-- ── Record pane ────────────────────────────────────────────────── -->
+<section class="tab-pane active" id="pane-record" role="tabpanel" aria-labelledby="tab-btn-record">
+
+  <!-- Workflow indicator + drop zone -->
+  <div class="pane-section">
+    <div class="pane-label">Workflow</div>
+    <div id="wf-status" class="wf-status">
+      <span id="wf-name">Example 1 (txt2img)</span>
+      <span id="wf-meta">7 nodes · 16 narrations</span>
+    </div>
+    <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="Drop or browse for workflow JSON file">
+      <div class="drop-icon" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+      </div>
+      <div class="drop-title">Drop workflow JSON</div>
+      <div class="drop-sub">or <a id="drop-browse">click to browse</a> for a file</div>
+      <div class="drop-hint">tip: you can also drop into the VO Script tab</div>
+      <input type="file" id="drop-input" accept=".json,application/json" style="display:none">
+    </div>
+  </div>
+
+  <div class="pane-section">
+    <div class="pane-label">Recording</div>
+    <div class="opts">
+      <label for="opt-vo-source">Voice</label>
+      <select id="opt-vo-source">
+        <option value="bundled" selected>Bundled MP3s (Example)</option>
+        <option value="elevenlabs">ElevenLabs (live)</option>
+        <option value="none">No audio</option>
+      </select>
+
+      <label for="opt-record">Capture</label>
+      <select id="opt-record">
+        <option value="tab" selected>Tab (no picker)</option>
+        <option value="screen">Pick window</option>
+        <option value="off">Off</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- ── REPLAY OPTIONS (collapsible accordion, default-open) ────────── -->
+  <details class="cf-section" open>
+    <summary>Replay Options</summary>
+
+    <!-- Example workflow shortcuts -->
+    <div class="btn-row" style="gap:6px; margin-top:10px; margin-bottom:6px;">
+      <button id="cf-use-example" style="flex:1;">Use Example</button>
+      <button id="cf-use-example-short" style="flex:1;">Use Example 2 (Short)</button>
+    </div>
+
+    <div class="cf-options">
+
+      <div class="cf-opt cf-opt-slider">
+        <div>
+          <div class="cf-opt-label">VO Padding</div>
+          <div class="cf-opt-desc">Milliseconds of pause before & after each narration</div>
+        </div>
+        <span class="cf-opt-value" id="cf-delay-value">1000ms</span>
+        <input class="cf-range" type="range" id="cf-delay" min="300" max="3000" step="100" value="1000"
+               data-target="delay-range">
+        <span></span>
+      </div>
+
+      <div class="cf-opt cf-opt-slider">
+        <div>
+          <div class="cf-opt-label">Typing Speed</div>
+          <div class="cf-opt-desc">Milliseconds per character (smaller = faster)</div>
+        </div>
+        <span class="cf-opt-value" id="cf-typing-value">50ms</span>
+        <input class="cf-range" type="range" id="cf-typing" min="15" max="200" step="5" value="50"
+               data-target="typing-delay-range">
+        <span></span>
+      </div>
+
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Cursor Style</div>
+          <div class="cf-opt-desc">macOS pointer or generic arrow</div>
+        </div>
+        <select class="cf-opt-select" id="cf-cursor-style" data-target="cursor-style">
+          <option value="macos" selected>macOS Cursor</option>
+          <option value="default">Default Arrow</option>
+        </select>
+      </div>
+
+      <div class="cf-opt cf-opt-slider">
+        <div>
+          <div class="cf-opt-label">Cursor Size</div>
+          <div class="cf-opt-desc">Visual size of the animated cursor</div>
+        </div>
+        <span class="cf-opt-value" id="cf-cursor-size-value">24px</span>
+        <input class="cf-range" type="range" id="cf-cursor-size" min="16" max="64" step="4" value="24"
+               data-target="cursor-size">
+        <span></span>
+      </div>
+
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Camera Follow</div>
+          <div class="cf-opt-desc">Auto-pan canvas to keep the active node visible</div>
+        </div>
+        <button class="cf-toggle" id="cf-camera-follow" role="switch" aria-checked="true"
+                data-target="camera-pan-toggle" aria-label="Toggle camera follow"></button>
+      </div>
+
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Camera Zoom</div>
+          <div class="cf-opt-desc">Zoom in on nodes & connections to keep focus tight</div>
+        </div>
+        <button class="cf-toggle" id="cf-camera-zoom" role="switch" aria-checked="false"
+                data-target="camera-zoom-toggle" aria-label="Toggle camera zoom"></button>
+      </div>
+
+    </div>
+  </details>
+
+  <!-- ── VIDEO OPTIONS (collapsed) ──────────────────────────────────── -->
+  <details class="cf-section">
+    <summary>Video Options</summary>
+    <div class="cf-options" style="margin-top:8px;">
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Record Video</div>
+          <div class="cf-opt-desc">Generate a screen recording during replay</div>
+        </div>
+        <button class="cf-toggle" id="cf-record-video" role="switch" aria-checked="false"
+                data-target="record-video-toggle" aria-label="Toggle record video"></button>
+      </div>
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Convert to MP4</div>
+          <div class="cf-opt-desc">Re-encode recording from WebM to MP4</div>
+        </div>
+        <button class="cf-toggle" id="cf-mp4" role="switch" aria-checked="false"
+                data-target="mp4-toggle" aria-label="Toggle MP4 conversion"></button>
+      </div>
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Export FCPXML</div>
+          <div class="cf-opt-desc">Generate Final Cut / Premiere timeline file</div>
+        </div>
+        <button class="cf-toggle" id="cf-xml" role="switch" aria-checked="false"
+                data-target="xml-toggle" aria-label="Toggle FCPXML export"></button>
+      </div>
+    </div>
+  </details>
+
+  <!-- ── UI OPTIONS (collapsed) ─────────────────────────────────────── -->
+  <details class="cf-section">
+    <summary>UI Options</summary>
+    <div class="cf-options" style="margin-top:8px;">
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">On-screen Captions</div>
+          <div class="cf-opt-desc">Show node title labels during replay</div>
+        </div>
+        <button class="cf-toggle" id="cf-captions" role="switch" aria-checked="false"
+                data-target="captions-toggle" aria-label="Toggle captions"></button>
+      </div>
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Animate Node Resize</div>
+          <div class="cf-opt-desc">Animate nodes growing from a starting size</div>
+        </div>
+        <button class="cf-toggle" id="cf-node-resize" role="switch" aria-checked="true"
+                data-target="node-resize-toggle" aria-label="Toggle node resize animation"></button>
+      </div>
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Keep Everything in View</div>
+          <div class="cf-opt-desc">Auto-fit canvas as new nodes are placed</div>
+        </div>
+        <button class="cf-toggle" id="cf-autofit" role="switch" aria-checked="false"
+                data-target="autofit-toggle" aria-label="Toggle auto-fit"></button>
+      </div>
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Humanistic Mode</div>
+          <div class="cf-opt-desc">Copy-paste repeated node clusters (more lifelike)</div>
+        </div>
+        <button class="cf-toggle" id="cf-humanistic" role="switch" aria-checked="false"
+                data-target="humanistic-toggle" aria-label="Toggle humanistic mode"></button>
+      </div>
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Animate Combo Selection</div>
+          <div class="cf-opt-desc">Show real dropdown interaction for combo widgets</div>
+        </div>
+        <button class="cf-toggle" id="cf-combo-ui" role="switch" aria-checked="true"
+                data-target="combo-ui-toggle" aria-label="Toggle combo UI animation"></button>
+      </div>
+
+      <div class="cf-opt cf-opt-slider">
+        <div>
+          <div class="cf-opt-label">Resize Duration</div>
+          <div class="cf-opt-desc">How long the node resize animation runs</div>
+        </div>
+        <span class="cf-opt-value" id="cf-resize-dur-value">500ms</span>
+        <input class="cf-range" type="range" id="cf-resize-dur" min="100" max="1500" step="50" value="500"
+               data-target="resize-duration">
+        <span></span>
+      </div>
+
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Resize Easing</div>
+          <div class="cf-opt-desc">Curve used during node resize</div>
+        </div>
+        <select class="cf-opt-select" id="cf-resize-easing" data-target="resize-easing">
+          <option value="cubic" selected>Smooth (ease-in-out)</option>
+          <option value="easeOut">Ease Out</option>
+          <option value="easeIn">Ease In</option>
+          <option value="back">Back (overshoot)</option>
+          <option value="linear">Linear</option>
+        </select>
+      </div>
+
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Resize Start Size</div>
+          <div class="cf-opt-desc">Initial node size before animating</div>
+        </div>
+        <select class="cf-opt-select" id="cf-resize-start" data-target="resize-start">
+          <option value="default" selected>Default (LiteGraph min)</option>
+          <option value="half">Half</option>
+          <option value="quarter">Quarter</option>
+          <option value="zero">Zero</option>
+        </select>
+      </div>
+    </div>
+  </details>
+
+  <!-- ── VO OPTIONS (collapsed) ─────────────────────────────────────── -->
+  <details class="cf-section">
+    <summary>VO Options</summary>
+    <div class="cf-options" style="margin-top:8px;">
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Show VO Captions</div>
+          <div class="cf-opt-desc">Display narration text as on-screen captions</div>
+        </div>
+        <button class="cf-toggle" id="cf-vo-captions" role="switch" aria-checked="false"
+                data-target="vo-captions-toggle" aria-label="Toggle VO captions"></button>
+      </div>
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">AI Voice Over Timing</div>
+          <div class="cf-opt-desc">Adjust replay speed to match each narration's length</div>
+        </div>
+        <button class="cf-toggle" id="cf-ai-timing" role="switch" aria-checked="false"
+                data-target="ai-timing-toggle" aria-label="Toggle AI voice over timing"></button>
+      </div>
+    </div>
+  </details>
+
+  <!-- ── DEBUG OPTIONS (collapsed) ──────────────────────────────────── -->
+  <details class="cf-section">
+    <summary>Debug Options</summary>
+    <div class="cf-options" style="margin-top:8px;">
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Show Debug Log</div>
+          <div class="cf-opt-desc">Overlay debug log inside the Comfy tab during replay</div>
+        </div>
+        <button class="cf-toggle" id="cf-debug-log" role="switch" aria-checked="false"
+                data-target="show-debug-log-toggle" aria-label="Toggle debug log"></button>
+      </div>
+    </div>
+  </details>
+
+  <!-- ── AI SETTINGS link (collapsed; complex inputs stay in VO Script tab) ─ -->
+  <details class="cf-section">
+    <summary>AI Settings (optional)</summary>
+    <div style="margin-top:8px; font-size:11px; color:var(--fg-2); line-height:1.5;">
+      Provider, API key and image upload live in the
+      <a id="link-ai-settings" style="color:var(--comfy-yellow); font-weight:700; cursor:pointer;">VO Script tab</a> —
+      open it and scroll to AI Settings.
+    </div>
+  </details>
+
+  <div id="progress" class="pane-section">
+    <div id="progress-beat">—</div>
+    <div id="progress-meta">
+      <span id="progress-counter">0/0</span>
+      <span id="progress-time">0:00</span>
+    </div>
+    <div class="pbar-track"><div class="pbar-fill" id="pbar-fill"></div></div>
+  </div>
+</section>
+
+<!-- ── VO Script pane (iframe with the full generator) ────────────── -->
+<section class="tab-pane" id="pane-script" role="tabpanel" aria-labelledby="tab-btn-script">
+  <iframe id="gen-frame" src="generator.html"></iframe>
+</section>
+
+<div class="bottom">
+  <details>
+    <summary>📜 Log</summary>
+    <div id="log"></div>
+  </details>
+  <!-- AI Script Writing — text generation lives in the iframe form -->
+  <details>
+    <summary>📝 AI Script Writing</summary>
+    <div class="settings-body">
+      <div style="font-size:11px; color:var(--fg-2); line-height:1.5; font-weight:500;">
+        Choose the LLM that <b style="color:var(--fg)">writes</b> narrations from your workflow JSON
+        (Google Gemini, Anthropic Claude, or OpenAI GPT-4o).
+      </div>
+      <a id="link-ai-script"
+         style="color:var(--comfy-yellow); font-weight:700; cursor:pointer; font-size:11px;">
+        Open settings in VO Script tab →
+      </a>
+    </div>
+  </details>
+
+  <!-- AI VO Generation — text-to-speech provider switcher -->
+  <details>
+    <summary>🎙 AI VO Generation</summary>
+    <div class="settings-body">
+      <div style="font-size:11px; color:var(--fg-2); line-height:1.5; font-weight:500;">
+        Choose the provider that <b style="color:var(--fg)">voices</b> each narration clip.
+        Switch any time; settings are saved per provider.
+      </div>
+
+      <label>Provider
+        <select id="vo-provider" style="background:rgba(240,239,237,0.04); color:var(--fg);
+                border:1px solid var(--line); border-radius:4px; padding:6px 8px;
+                font:inherit; font-size:11px; font-weight:600; width:100%;">
+          <option value="elevenlabs" selected>ElevenLabs</option>
+          <option value="comfyui">ComfyUI VO (experimental)</option>
+        </select>
+      </label>
+
+      <!-- ELEVENLABS fields -->
+      <div data-provider-fields="elevenlabs"
+           style="display:flex; flex-direction:column; gap:7px; padding-top:8px;
+                  border-top:1px solid var(--line);">
+        <label>API Key
+          <input id="el-key" type="password" placeholder="sk_…">
+        </label>
+        <label>Voice ID <span id="el-voice-name" style="color:var(--comfy-yellow);"></span>
+          <input id="el-voice" type="text" placeholder="EXAVITQu4vr4xnSDxMaL">
+        </label>
+        <label>Model
+          <input id="el-model" type="text" value="eleven_turbo_v2_5">
+        </label>
+        <div style="display:flex; gap:5px;">
+          <button id="el-save" style="flex:1;">Save</button>
+          <button id="el-list">List Voices</button>
+          <button id="el-clear">Clear Cache</button>
+        </div>
+        <div id="el-status" style="font-size:11px; color:var(--muted);"></div>
+      </div>
+
+      <!-- COMFYUI VO fields -->
+      <div data-provider-fields="comfyui"
+           style="display:none; flex-direction:column; gap:7px; padding-top:8px;
+                  border-top:1px solid var(--line);">
+        <div style="font-size:10.5px; color:var(--comfy-lilac); font-weight:600;
+                    background:rgba(219,214,242,0.06); border:1px solid rgba(219,214,242,0.2);
+                    border-radius:4px; padding:6px 8px;">
+          ⚠ Experimental — wire your ComfyUI VO endpoint below. TTS happens via a Comfy workflow
+          that returns an MP3 stream.
+        </div>
+        <label>API Endpoint
+          <input id="cf-vo-endpoint" type="text" placeholder="https://api.comfy.org/v1/tts">
+        </label>
+        <label>Auth Token (optional)
+          <input id="cf-vo-token" type="password" placeholder="bearer token if required">
+        </label>
+        <label>Workflow / Voice ID
+          <input id="cf-vo-voice" type="text" placeholder="e.g. tts-base / your voice id">
+        </label>
+        <label>Model
+          <input id="cf-vo-model" type="text" placeholder="e.g. coqui-xtts-v2">
+        </label>
+        <div style="display:flex; gap:5px;">
+          <button id="cf-vo-save" style="flex:1;">Save</button>
+          <button id="cf-vo-test">Test</button>
+          <button id="cf-vo-clear-cache">Clear Cache</button>
+        </div>
+        <div id="cf-vo-status" style="font-size:11px; color:var(--muted);"></div>
+      </div>
+
+    </div>
+  </details>
+</div>
+
+<script src="panel.js" type="module"></script>
+</body>
+</html>

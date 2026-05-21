@@ -4,6 +4,39 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ComfyUI Replay Generator</title>
+
+  <!-- ── Extension sandbox shims ──────────────────────────────────────
+       Sandboxed iframes run with origin=null, so localStorage and
+       sessionStorage throw SecurityError on access. Without this shim
+       the main script halts on its first localStorage.getItem() and
+       window.loadExampleWorkflow never gets defined. The shim is
+       in-memory only — settings won't persist across reloads — but
+       that's fine for use inside the extension (real settings live in
+       chrome.storage at the panel level). -->
+  <script>
+    (function () {
+      function makeShim() {
+        const m = new Map();
+        return {
+          getItem(k)        { return m.has(k) ? m.get(k) : null; },
+          setItem(k, v)     { m.set(String(k), String(v)); },
+          removeItem(k)     { m.delete(String(k)); },
+          clear()           { m.clear(); },
+          key(i)            { return [...m.keys()][i] ?? null; },
+          get length()      { return m.size; },
+        };
+      }
+      function safeReplace(name) {
+        try { window[name].getItem('__probe__'); }
+        catch (_) {
+          try { Object.defineProperty(window, name, { value: makeShim(), configurable: true, writable: false }); } catch(_){}
+        }
+      }
+      safeReplace('localStorage');
+      safeReplace('sessionStorage');
+    })();
+  </script>
+
   <script src="https://unpkg.com/lucide@latest"></script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
@@ -626,6 +659,147 @@
     }
   </style>
 
+  <!-- ── Comfy brand override (loaded inside extension iframe) ────────
+       Retheme generator UI to use Comfy palette + PP Formula font stack.
+       Single source of truth for any rebrand: only :root vars below. -->
+  <style id="comfy-brand-override">
+    :root {
+      /* Comfy palette */
+      --comfy-ink:        #211927;
+      --comfy-yellow:     #F2FF59;
+      --comfy-canvas:     #C2BFB9;
+      --comfy-plum:       #493787;
+      --comfy-warm-white: #F0EFED;
+      --comfy-lilac:      #DBD6F2;
+      --comfy-mauve:      #4D3762;
+
+      /* Override the generator's own variables */
+      --bg:       var(--comfy-ink);
+      --surface:  #2a2030;
+      --surface2: var(--comfy-mauve);
+      --border:   rgba(219, 214, 242, 0.12);
+      --accent:   var(--comfy-yellow);
+      --accent2:  var(--comfy-plum);
+      --green:    var(--comfy-yellow);
+      --text:     var(--comfy-warm-white);
+      --muted:    rgba(194, 191, 185, 0.55);
+    }
+
+    body, html, button, input, select, textarea {
+      font-family: 'PP Formula', 'PP Formula Condensed', 'ABC Diatype', 'Söhne',
+                   'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif !important;
+      font-style: normal !important;
+    }
+    *, *:before, *:after { font-style: normal !important; }
+
+    /* Weight register — bump everything one notch heavier than the generator's
+       defaults so legibility matches the Comfy-branded panel above it. */
+    body { font-weight: 500 !important; }
+    label, .option-label, .option-meta, .field-label, .control-label,
+    .header-title, .filename, .file-name,
+    button, input, select, textarea, .ai-btn, .btn-gen-vo {
+      font-weight: 600 !important;
+    }
+    h1, h2, h3, h4, h5, h6,
+    .title, .header h1, .section-title, .pane-title,
+    strong, b { font-weight: 800 !important; }
+    .option-desc, .help-text, .preview-narration { font-weight: 500 !important; }
+    .pill, .badge, .tag, .status, .file-status { font-weight: 700 !important; }
+
+    /* Toggle switch: Yellow when on, neutral when off (was cyan) */
+    .slider { background-color: rgba(194, 191, 185, 0.22) !important; }
+    .slider:before { background-color: var(--comfy-warm-white) !important; }
+    input:checked + .slider {
+      background-color: var(--comfy-yellow) !important;
+    }
+    input:checked + .slider:before { background-color: var(--comfy-ink) !important; }
+
+    /* Range slider track + thumb */
+    input[type="range"] {
+      -webkit-appearance: none; appearance: none;
+      background: transparent;
+    }
+    input[type="range"]::-webkit-slider-runnable-track {
+      height: 3px; background: rgba(219, 214, 242, 0.18); border-radius: 2px;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none;
+      width: 14px; height: 14px; border-radius: 50%;
+      background: var(--comfy-yellow);
+      margin-top: -5.5px;
+      border: 2px solid var(--comfy-ink);
+      box-shadow: 0 0 0 1px rgba(242, 255, 89, 0.4);
+      cursor: pointer;
+    }
+    input[type="range"]:hover::-webkit-slider-thumb { box-shadow: 0 0 0 4px rgba(242, 255, 89, 0.2); }
+
+    /* AI gradient buttons → Plum solid (no gradients per brand rules) */
+    .ai-btn, .btn-gen-vo {
+      background: var(--comfy-plum) !important;
+      color: var(--comfy-warm-white) !important;
+      border: 1px solid var(--comfy-plum) !important;
+    }
+    .ai-btn:hover:not(:disabled), .btn-gen-vo:hover:not(:disabled) {
+      background: var(--comfy-mauve) !important;
+      border-color: var(--comfy-mauve) !important;
+      filter: none !important;
+    }
+
+    /* Inline links / focal accents that were cyan */
+    a, .accent, .text-accent { color: var(--comfy-yellow) !important; }
+
+    /* Status pills / badges that were cyan */
+    .file-status.status-done {
+      background: rgba(242, 255, 89, 0.14) !important;
+      color: var(--comfy-yellow) !important;
+      border-color: rgba(242, 255, 89, 0.4) !important;
+    }
+
+    /* Focused inputs */
+    input:focus, textarea:focus, select:focus {
+      outline: none !important;
+      border-color: var(--comfy-yellow) !important;
+      box-shadow: 0 0 0 2px rgba(242, 255, 89, 0.15) !important;
+    }
+
+    /* Drop zone hover */
+    .drop-zone.dragover, .image-zone.dragover {
+      border-color: var(--comfy-yellow) !important;
+      background: rgba(242, 255, 89, 0.06) !important;
+    }
+
+    /* No italics in any preview narration */
+    .preview-narration, .narration, em, i {
+      font-style: normal !important;
+    }
+
+    /* ── Hide everything that's been moved to the extension panel ─────
+       The VO Script tab only needs: workflow drop zone, file queue
+       (cards), and the narration preview/editor (the right pane).
+       Plus the AI Settings section so users can set provider+key for
+       "AI Script" narration generation. */
+
+    /* Redundant generator header — the panel has its own header */
+    .app-left > header { display: none !important; }
+
+    /* Nuke the entire Replay Options column EXCEPT the AI Settings
+       collapsible (which is the LAST .options-section). The panel
+       owns every other control. */
+    .options > .options-title,
+    .options > .option-row { display: none !important; }
+    .options > .options-section:not(:last-of-type) { display: none !important; }
+
+    /* AI Settings stays — give it a clean header since the wrapping
+       "Replay Options" title is gone */
+    .options > .options-section:last-of-type {
+      margin-top: 0 !important;
+    }
+    .options { padding-top: 8px !important; }
+
+    /* "Use Example" buttons are now in the panel — hide them in the iframe */
+    .btn-example { display: none !important; }
+  </style>
+
   <!-- Optional local config (gitignored) -->
   <script src="config.local.js" onerror=""></script>
 </head>
@@ -909,8 +1083,18 @@
     </details>
 
     <details class="options-section">
-      <summary>AI Settings (Optional)</summary>
+      <summary>AI Script Writing</summary>
       <div class="options-body">
+    <div style="padding: 8px 12px; margin-bottom: 8px;
+                background: rgba(219, 214, 242, 0.06);
+                border: 1px solid rgba(219, 214, 242, 0.2);
+                border-radius: 6px; font-size: 12px;
+                color: var(--comfy-warm-white, #F0EFED); line-height: 1.5;">
+      Provider used to <b>write narration scripts</b> from your workflow JSON.
+      VO <i style="font-style: normal; color: var(--comfy-yellow, #F2FF59); font-weight: 700;">voice</i>
+      (ElevenLabs / ComfyUI) is configured in the extension panel's
+      <b>🎙 AI VO Generation</b> drawer.
+    </div>
     <div class="ai-config-auto" id="config-auto-badge">
       ✅ Local config loaded — using <strong id="config-auto-provider">Google Gemini</strong>
     </div>
@@ -918,7 +1102,7 @@
       <div class="option-row">
         <div class="option-meta">
           <div class="option-label">AI Provider</div>
-          <div class="option-desc">Choose your AI for narration generation</div>
+          <div class="option-desc">Choose the LLM that writes the narration text</div>
         </div>
         <select id="ai-provider">
           <option value="google">Google Gemini</option>
@@ -3809,6 +3993,220 @@
       }
       regenerateAll();
     });
+  </script>
+
+  <!-- Extension-mode visual tweaks. Active only when body.classList contains
+       "ext-mode" — set by the bridge when running inside the extension iframe.
+       Standalone http://localhost:8081/index.html keeps its original UI. -->
+  <style>
+    body.ext-mode header,
+    body.ext-mode .drop-zone,
+    body.ext-mode #image-preview,
+    body.ext-mode #drop-prompt,
+    body.ext-mode .clear-image {
+      display: none !important;
+    }
+    body.ext-mode {
+      padding-top: 8px !important;
+    }
+    body.ext-mode main,
+    body.ext-mode .container,
+    body.ext-mode .app {
+      padding-top: 0 !important;
+      margin-top: 0 !important;
+    }
+    /* Compact the file/workflow cards — most space is spent on the
+       narration preview, which IS valuable in the extension (editing
+       narrations is the whole point). Just tighten margins. */
+    body.ext-mode .file-card,
+    body.ext-mode .preview-card {
+      margin-top: 6px !important;
+    }
+    /* Hide the buttons that don't apply inside the extension:
+       - Copy (panel auto-injects)
+       - Download (we use showSaveFilePicker after recording)
+       - Remove (only one workflow in extension flow) */
+    body.ext-mode button[onclick^="copyScript"],
+    body.ext-mode button[onclick^="downloadScript"],
+    body.ext-mode button[onclick^="removeFile"] {
+      display: none !important;
+    }
+    /* "Status: Ready" badge looks weird without the buttons — tone it down */
+    body.ext-mode .file-status {
+      opacity: 0.6 !important;
+    }
+    /* Hide section sub-headings that the extension doesn't need to surface */
+    body.ext-mode .options-section summary {
+      font-size: 12px !important;
+    }
+  </style>
+
+  <!-- Extension bridge — listens for messages from the parent panel and
+       exposes the generator state (workflows, scripts, narrations).
+       The sandboxed iframe is cross-origin to the panel, so postMessage
+       is the only path. -->
+  <script>
+    // Activate extension-mode CSS as soon as the body exists
+    if (document.body) document.body.classList.add('ext-mode');
+    else document.addEventListener('DOMContentLoaded', () => document.body.classList.add('ext-mode'));
+  </script>
+  <script>
+    (function () {
+      const reply = (id, payload) => {
+        try { window.parent.postMessage({ source: 'comfy-replay-gen', id, ...payload }, '*'); } catch (_) {}
+      };
+
+      // Intercept clipboard writes so we can capture what copyScript() emits
+      // (the generator stores its files in a closure-scoped Map; copyScript
+      // is the only way out short of refactoring it).
+      let lastCapturedScript = null;
+      const origClipboardWrite = navigator.clipboard?.writeText?.bind(navigator.clipboard);
+      if (origClipboardWrite) {
+        navigator.clipboard.writeText = async (txt) => {
+          lastCapturedScript = txt;
+          // Sandbox iframes can't access the system clipboard ("Document is
+          // not focused"). We've already captured the script above; swallow
+          // the rejection so it doesn't surface as an "Uncaught in promise"
+          // error in the panel's DevTools console.
+          try { await origClipboardWrite(txt); } catch (_) { /* expected in sandbox */ }
+          return;
+        };
+      }
+
+      window.addEventListener('message', async (ev) => {
+        const msg = ev.data;
+        if (!msg || msg.source !== 'comfy-replay-panel') return;
+
+        if (msg.type === 'list-files') {
+          const cards = [...document.querySelectorAll('button[onclick^="copyScript"]')];
+          const items = cards.map((btn, i) => {
+            const onclick = btn.getAttribute('onclick') || '';
+            const m = onclick.match(/copyScript\(['"]([^'"]+)['"]\)/);
+            return { index: i, name: m ? m[1] : 'workflow-' + i };
+          });
+          reply(msg.id, { type: 'files', items });
+          return;
+        }
+
+        if (msg.type === 'load-json') {
+          // Receive a JSON string from the panel (when user drops a file
+          // onto the panel toolbar rather than the iframe) and feed it into
+          // the generator's processFile(). The generator handles narration
+          // detection and queue insertion from there.
+          try {
+            const text = msg.text;
+            const fname = msg.filename || 'workflow.json';
+            const file = new File([new Blob([text], { type: 'application/json' })], fname, { type: 'application/json' });
+            if (typeof window.processFile === 'function') {
+              window.processFile(file);
+              reply(msg.id, { type: 'load-json', ok: true, name: fname });
+            } else {
+              reply(msg.id, { type: 'load-json', ok: false, error: 'processFile not available in generator' });
+            }
+          } catch (e) {
+            reply(msg.id, { type: 'load-json', ok: false, error: e.message });
+          }
+          return;
+        }
+
+        if (msg.type === 'get-script') {
+          // Pick the MOST RECENTLY ADDED workflow if no name specified, so
+          // dropping a new JSON wins over the auto-loaded Example.
+          const wantName = msg.name || null;
+          const all = [...document.querySelectorAll('button[onclick^="copyScript"]')];
+          let btn;
+          if (wantName) {
+            btn = all.find(b => (b.getAttribute('onclick') || '').includes(JSON.stringify(wantName)));
+          }
+          if (!btn) btn = all[all.length - 1]; // latest
+          if (!btn) {
+            reply(msg.id, { type: 'script', ok: false, error: 'No workflow loaded yet. Click "Use Example" first or drop a JSON file.' });
+            return;
+          }
+          lastCapturedScript = null;
+          btn.click();
+          await new Promise(r => setTimeout(r, 250));
+          if (!lastCapturedScript) {
+            reply(msg.id, { type: 'script', ok: false, error: 'Copy did not capture (clipboard intercept missed). Try again.' });
+            return;
+          }
+          let narrations = null;
+          try {
+            const m = lastCapturedScript.match(/const\s+NARRATIONS\s*=\s*(\{[\s\S]*?\});/);
+            if (m && m[1] !== 'null') narrations = JSON.parse(m[1]);
+          } catch (_) { /* leave null */ }
+          const onclick = btn.getAttribute('onclick') || '';
+          const fileMatch = onclick.match(/copyScript\(['"]([^'"]+)['"]\)/);
+          const name = fileMatch ? fileMatch[1] : 'workflow.json';
+          reply(msg.id, { type: 'script', ok: true, script: lastCapturedScript, name, narrations });
+          return;
+        }
+
+        if (msg.type === 'click-example') {
+          try { window.loadExampleWorkflow(!!msg.short); }
+          catch (e) { reply(msg.id, { type: 'click-example', ok: false, error: e.message }); return; }
+          reply(msg.id, { type: 'click-example', ok: true });
+          return;
+        }
+
+        if (msg.type === 'click-ai-script') {
+          // Click "AI Script" on the first workflow card to populate narrations.
+          const btn = document.querySelector('button.btn-gen-vo[onclick^="aiGenNarrations"]');
+          if (!btn) { reply(msg.id, { type: 'click-ai-script', ok: false, error: 'no AI Script button visible — drop a workflow first' }); return; }
+          btn.click();
+          reply(msg.id, { type: 'click-ai-script', ok: true });
+          return;
+        }
+
+        if (msg.type === 'set-toggle') {
+          // msg.elementId is the DOM input id, msg.checked is boolean.
+          const el = document.getElementById(msg.elementId);
+          if (!el) { reply(msg.id, { type: 'set-toggle', ok: false, error: 'no element #' + msg.elementId }); return; }
+          el.checked = !!msg.checked;
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          reply(msg.id, { type: 'set-toggle', ok: true });
+          return;
+        }
+
+        if (msg.type === 'set-range' || msg.type === 'set-value') {
+          // Update a range / number / select element. msg.elementId, msg.value.
+          // Fires 'input' (for live slider updates) then 'change'.
+          const el = document.getElementById(msg.elementId);
+          if (!el) { reply(msg.id, { type: msg.type, ok: false, error: 'no element #' + msg.elementId }); return; }
+          el.value = String(msg.value);
+          el.dispatchEvent(new Event('input',  { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          reply(msg.id, { type: msg.type, ok: true });
+          return;
+        }
+
+        if (msg.type === 'get-options') {
+          // Snapshot of the most-commonly-tweaked option values for the
+          // panel's "Replay Options" mirror.
+          const ids = [
+            'delay-range', 'typing-delay-range', 'cursor-size',
+            'cursor-style-select',
+            'camera-pan-toggle', 'camera-zoom-toggle',
+            'record-video-toggle', 'mp4-toggle', 'xml-toggle',
+            'captions-toggle', 'node-resize-toggle', 'autofit-toggle',
+            'humanistic-toggle', 'combo-ui-toggle',
+            'ai-timing-toggle',
+          ];
+          const out = {};
+          for (const id of ids) {
+            const el = document.getElementById(id);
+            if (!el) continue;
+            if (el.type === 'checkbox') out[id] = { kind: 'toggle', value: el.checked };
+            else out[id] = { kind: 'value', value: el.value };
+          }
+          reply(msg.id, { type: 'get-options', ok: true, options: out });
+          return;
+        }
+      });
+
+      // Notify parent that we're alive
+      try { window.parent.postMessage({ source: 'comfy-replay-gen', type: 'bridge-ready' }, '*'); } catch (_) {}
+    })();
   </script>
 </body>
 </html>
