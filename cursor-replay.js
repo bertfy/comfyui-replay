@@ -603,7 +603,28 @@ function log(step, total, msg) {
                 await page.keyboard.press("Delete");
                 await sleep(50);
                 
-                await page.keyboard.type(String(val), {delay: 15 + Math.random() * 20});
+                // Type only enough to be visible for tutorial purposes,
+                // then paste the rest so we don't sit typing a 500-char prompt.
+                const TYPE_VISIBLE_CHARS = 60;
+                const fullVal = String(val);
+                const typedPart = fullVal.slice(0, TYPE_VISIBLE_CHARS);
+                const remainder = fullVal.slice(TYPE_VISIBLE_CHARS);
+                await page.keyboard.type(typedPart, {delay: 15 + Math.random() * 20});
+                if (remainder) {
+                  // Inject remainder directly into the focused element and
+                  // dispatch input/change so Comfy picks it up.
+                  await page.evaluate((rest) => {
+                    const el = document.activeElement;
+                    if (!el) return;
+                    if ('value' in el) {
+                      el.value = (el.value || '') + rest;
+                    } else if (el.isContentEditable) {
+                      el.textContent = (el.textContent || '') + rest;
+                    }
+                    el.dispatchEvent(new Event('input',  { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                  }, remainder);
+                }
                 await sleep(100);
                 
                 // Click slightly away to remove focus

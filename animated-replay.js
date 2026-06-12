@@ -232,8 +232,11 @@ const script = `// ════════════════════�
     await slp(200);
 
     // Type character by character with blinking cursor
+    // Cap animated typing to what fits visibly; snap-fill the rest.
+    const TYPE_VISIBLE_CHARS = 60;
     w.value = '';
     const strText = String(text);
+    const typeLimit = Math.min(strText.length, TYPE_VISIBLE_CHARS);
     let cursorVisible = true;
     const cursorBlink = setInterval(() => {
       cursorVisible = !cursorVisible;
@@ -242,7 +245,7 @@ const script = `// ════════════════════�
       app.canvas.setDirty(true, true);
     }, 400);
 
-    for (let i = 0; i < strText.length; i++) {
+    for (let i = 0; i < typeLimit; i++) {
       if (window.__replayStop) { clearInterval(cursorBlink); w.value = strText; return; }
       w.value = strText.slice(0, i + 1) + '|';
       cursorVisible = true;
@@ -253,7 +256,7 @@ const script = `// ════════════════════�
     }
 
     clearInterval(cursorBlink);
-    w.value = strText; // Remove cursor, set final value
+    w.value = strText; // Snap-fill remainder + remove cursor
     app.canvas.setDirty(true, true);
 
     // Trigger callback
