@@ -216,13 +216,32 @@
   }
   .tab-pane.active { display: flex; }
 
-  /* Record pane content */
-  #pane-record {
+  /* ── Shared action bar (Tour + Build) — Record/Stop + progress ──── */
+  .action-bar {
+    flex: 0 0 auto;
+    padding: 0 12px 10px;
+    background: var(--bg);
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .action-bar.hidden { display: none; }
+
+  /* Mode explainer at the top of each pane */
+  .pane-desc {
+    font-size: 11px; color: var(--fg-2); line-height: 1.5; font-weight: 500;
+    background: rgba(240, 239, 237, 0.03);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 8px 10px;
+  }
+  .pane-desc b { color: var(--fg); }
+
+  /* Tour / Build pane content */
+  #pane-tour, #pane-build {
     padding: 14px 12px;
     overflow-y: auto;
     gap: 10px;
   }
-  #pane-record > * { margin: 0; }
+  #pane-tour > *, #pane-build > * { margin: 0; }
   .pane-section { display: flex; flex-direction: column; gap: 8px; }
   .pane-label {
     font-size: 10px; color: var(--fg-2);
@@ -584,7 +603,7 @@
 <div class="hdr">
   <div class="hdr-title-row">
     <span class="hdr-title">ComfyUI Replay</span>
-    <span class="hdr-version">v0.5</span>
+    <span class="hdr-version" id="hdr-version">v—</span>
     <span class="hdr-spacer"></span>
     <span class="state" id="state-pill" data-status="setup">
       <span class="state-dot"></span>
@@ -598,29 +617,178 @@
   </div>
 </div>
 
-<div class="pane-section" style="padding:0 12px;">
-  <div class="btn-row">
-    <button id="btn-record" class="primary" disabled>▶ Record Replay</button>
-  </div>
-  <div class="btn-row" style="gap:4px;">
-    <button id="btn-stop" disabled style="flex:1;">■ Stop</button>
-    <button id="btn-reload" title="Re-run Example setup" style="flex:1;">↻ Reload Example</button>
-  </div>
-</div>
-
 <div class="tabs-wrap">
   <div class="tabs" role="tablist">
-    <button class="tab-btn active" id="tab-btn-record" data-tab="record" role="tab" aria-selected="true">
-      Record
+    <button class="tab-btn active" id="tab-btn-tour" data-tab="tour" role="tab" aria-selected="true">
+      Tour
+    </button>
+    <button class="tab-btn" id="tab-btn-build" data-tab="build" role="tab" aria-selected="false">
+      Build
     </button>
     <button class="tab-btn" id="tab-btn-script" data-tab="script" role="tab" aria-selected="false">
-      VO Script <span class="badge" id="script-badge">—</span>
+      Script <span class="badge" id="script-badge">—</span>
     </button>
   </div>
 </div>
 
-<!-- ── Record pane ────────────────────────────────────────────────── -->
-<section class="tab-pane active" id="pane-record" role="tabpanel" aria-labelledby="tab-btn-record">
+<!-- ── Shared action bar — Record/Stop + progress (Tour & Build) ──── -->
+<div class="action-bar" id="action-bar">
+  <button id="btn-record" class="primary" disabled>▶ Record Tour</button>
+  <button id="btn-stop" disabled>■ Stop</button>
+  <div id="progress">
+    <div id="progress-beat">—</div>
+    <div id="progress-meta">
+      <span id="progress-counter">0/0</span>
+      <span id="progress-time">0:00</span>
+    </div>
+    <div class="pbar-track"><div class="pbar-fill" id="pbar-fill"></div></div>
+  </div>
+</div>
+
+<!-- ── Tour pane — walkthrough of the live, already-loaded graph ──── -->
+<section class="tab-pane active" id="pane-tour" role="tabpanel" aria-labelledby="tab-btn-tour">
+  <div class="pane-desc">
+    Cinematic walkthrough of the workflow <b>already open</b> in your Comfy tab —
+    overview, each stage, key nodes, then Run and the generated result.
+    No setup needed.
+  </div>
+
+  <div class="pane-section">
+    <div class="pane-label">Recording</div>
+    <div class="opts">
+      <label for="preset-tour">Preset</label>
+      <select id="preset-tour">
+        <option value="polished-demo" selected>Polished Demo</option>
+        <option value="fast-draft">Fast Draft</option>
+        <option value="custom">Custom</option>
+      </select>
+
+      <label for="opt-tour-vo">Voice</label>
+      <select id="opt-tour-vo">
+        <option value="elevenlabs" selected>AI narration + ElevenLabs</option>
+        <option value="none">No narration</option>
+      </select>
+
+      <label for="opt-tour-record">Capture</label>
+      <select id="opt-tour-record">
+        <option value="tab" selected>Tab (no picker)</option>
+        <option value="screen">Pick window</option>
+        <option value="off">Off (dry run)</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- ── TOUR OPTIONS ────────────────────────────────────────────── -->
+  <details class="cf-section" open>
+    <summary>Tour Options</summary>
+    <div class="cf-options" style="margin-top:8px;">
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Ending</div>
+          <div class="cf-opt-desc">Pre-run: close on the output already saved in the graph (run it once beforehand) — no live wait</div>
+        </div>
+        <select class="cf-opt-select" id="tour-ending">
+          <option value="prerun" selected>Pre-run result</option>
+          <option value="live">Run live</option>
+          <option value="none">No ending</option>
+        </select>
+      </div>
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Camera Arc</div>
+          <div class="cf-opt-desc">Zoom out mid-flight on long travels (the cinematic lift)</div>
+        </div>
+        <button class="cf-toggle" id="tour-arc-toggle" role="switch" aria-checked="true"
+                aria-label="Toggle camera arc"></button>
+      </div>
+      <div class="cf-opt cf-opt-slider">
+        <div>
+          <div class="cf-opt-label">Cursor Size</div>
+          <div class="cf-opt-desc">macOS arrow size — 20px matches the native look</div>
+        </div>
+        <span class="cf-opt-value" id="tour-cursor-size-value">20px</span>
+        <input class="cf-range" type="range" id="tour-cursor-size" min="16" max="32" step="2" value="20">
+        <span></span>
+      </div>
+    </div>
+  </details>
+
+  <!-- ── CAPTURE QUALITY (shared with Build) ────────────────────────── -->
+  <details class="cf-section">
+    <summary>Capture Quality</summary>
+    <div class="cf-options" style="margin-top:8px;">
+      <div class="cf-opt cf-opt-slider">
+        <div>
+          <div class="cf-opt-label">Bitrate</div>
+          <div class="cf-opt-desc">12 Mbps matches the reference video quality</div>
+        </div>
+        <span class="cf-opt-value" id="cap-bitrate-value">12 Mbps</span>
+        <input class="cf-range" type="range" id="cap-bitrate" min="4" max="20" step="1" value="12">
+        <span></span>
+      </div>
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Frame Rate</div>
+          <div class="cf-opt-desc">Tab capture tends to drop frames at 60 on Retina</div>
+        </div>
+        <select class="cf-opt-select" id="cap-fps">
+          <option value="30" selected>30 fps</option>
+          <option value="60">60 fps (may drop frames)</option>
+        </select>
+      </div>
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Window Size</div>
+          <div class="cf-opt-desc">Resize the Comfy window so the tab is exactly 1920×1080</div>
+        </div>
+        <button id="btn-prep-window" style="white-space:nowrap;">Set to 1080p</button>
+      </div>
+    </div>
+  </details>
+
+  <!-- ── DEBUG ──────────────────────────────────────────────────────── -->
+  <details class="cf-section">
+    <summary>Debug</summary>
+    <div class="cf-options" style="margin-top:8px;">
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Test Tour</div>
+          <div class="cf-opt-desc">Load the bundled SkyReplacement workflow into the Comfy tab and run the full tour automatically</div>
+        </div>
+        <button id="btn-test-tour" style="white-space:nowrap;">▶ Test</button>
+      </div>
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Dump Survey</div>
+          <div class="cf-opt-desc">Log the graph survey + planned shot list without recording</div>
+        </div>
+        <button id="btn-survey-dump" style="white-space:nowrap;">Dump</button>
+      </div>
+    </div>
+  </details>
+</section>
+
+<!-- ── Build pane — node-by-node rebuild from a workflow JSON ─────── -->
+<section class="tab-pane" id="pane-build" role="tabpanel" aria-labelledby="tab-btn-build">
+  <div class="pane-desc">
+    Rebuilds a workflow <b>node by node</b> in the Comfy tab from a JSON file,
+    with typed prompts and animated connections — the original replay mode.
+  </div>
+
+  <div class="pane-section">
+    <div class="opts">
+      <label for="preset-build">Preset</label>
+      <select id="preset-build">
+        <option value="polished-demo" selected>Polished Demo</option>
+        <option value="fast-draft">Fast Draft</option>
+        <option value="classic-build">Classic Build (v0.6)</option>
+        <option value="custom">Custom</option>
+      </select>
+    </div>
+    <div class="btn-row">
+      <button id="btn-reload" title="Re-run Example setup" style="flex:1;">↻ Reload Example</button>
+    </div>
+  </div>
 
   <!-- Workflow indicator + drop zone -->
   <div class="pane-section">
@@ -639,7 +807,7 @@
       </div>
       <div class="drop-title">Drop workflow JSON</div>
       <div class="drop-sub">or <a id="drop-browse">click to browse</a> for a file</div>
-      <div class="drop-hint">tip: you can also drop into the VO Script tab</div>
+      <div class="drop-hint">tip: you can also drop into the Script tab</div>
       <input type="file" id="drop-input" accept=".json,application/json" style="display:none">
     </div>
   </div>
@@ -713,10 +881,19 @@
           <div class="cf-opt-label">Cursor Size</div>
           <div class="cf-opt-desc">Visual size of the animated cursor</div>
         </div>
-        <span class="cf-opt-value" id="cf-cursor-size-value">24px</span>
-        <input class="cf-range" type="range" id="cf-cursor-size" min="16" max="64" step="4" value="24"
+        <span class="cf-opt-value" id="cf-cursor-size-value">20px</span>
+        <input class="cf-range" type="range" id="cf-cursor-size" min="16" max="64" step="4" value="20"
                data-target="cursor-size">
         <span></span>
+      </div>
+
+      <div class="cf-opt">
+        <div>
+          <div class="cf-opt-label">Click Effects</div>
+          <div class="cf-opt-desc">Ripple ring on each click — off for the native look</div>
+        </div>
+        <button class="cf-toggle" id="cf-click-fx" role="switch" aria-checked="false"
+                data-target="click-fx-toggle" aria-label="Toggle click effects"></button>
       </div>
 
       <div class="cf-opt">
@@ -740,9 +917,13 @@
     </div>
   </details>
 
-  <!-- ── VIDEO OPTIONS (collapsed) ──────────────────────────────────── -->
+  <!-- ── LEGACY (record-server) — server-only export toggles ───────── -->
   <details class="cf-section">
-    <summary>Video Options</summary>
+    <summary>Legacy (record-server)</summary>
+    <div style="margin-top:8px; font-size:10.5px; color:var(--fg-2); line-height:1.5;">
+      These only apply when replaying via the local record-server — the
+      extension captures the tab itself and ignores them.
+    </div>
     <div class="cf-options" style="margin-top:8px;">
       <div class="cf-opt">
         <div>
@@ -899,22 +1080,14 @@
     <summary>AI Settings (optional)</summary>
     <div style="margin-top:8px; font-size:11px; color:var(--fg-2); line-height:1.5;">
       Provider, API key and image upload live in the
-      <a id="link-ai-settings" style="color:var(--comfy-yellow); font-weight:700; cursor:pointer;">VO Script tab</a> —
+      <a id="link-ai-settings" style="color:var(--comfy-yellow); font-weight:700; cursor:pointer;">Script tab</a> —
       open it and scroll to AI Settings.
     </div>
   </details>
 
-  <div id="progress" class="pane-section">
-    <div id="progress-beat">—</div>
-    <div id="progress-meta">
-      <span id="progress-counter">0/0</span>
-      <span id="progress-time">0:00</span>
-    </div>
-    <div class="pbar-track"><div class="pbar-fill" id="pbar-fill"></div></div>
-  </div>
 </section>
 
-<!-- ── VO Script pane (iframe with the full generator) ────────────── -->
+<!-- ── Script pane (iframe with the full generator) ───────────────── -->
 <section class="tab-pane" id="pane-script" role="tabpanel" aria-labelledby="tab-btn-script">
   <iframe id="gen-frame" src="generator.html"></iframe>
 </section>
@@ -934,7 +1107,7 @@
       </div>
       <a id="link-ai-script"
          style="color:var(--comfy-yellow); font-weight:700; cursor:pointer; font-size:11px;">
-        Open settings in VO Script tab →
+        Open settings in Script tab →
       </a>
     </div>
   </details>

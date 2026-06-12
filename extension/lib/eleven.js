@@ -47,12 +47,23 @@ export async function cacheClear() {
   });
 }
 
-// sha256 → 16 hex (browser SubtleCrypto)
-async function cacheKey(voiceId, model, text) {
-  const enc = new TextEncoder().encode(`${voiceId}|${model}|${text}`);
+// sha256 → 16 hex (browser SubtleCrypto). The key includes the stitching
+// context (previous/next text) — the same line reads differently mid-flow vs.
+// standalone, so they are genuinely different audio.
+async function cacheKey(voiceId, model, text, extra = '') {
+  const enc = new TextEncoder().encode(`${voiceId}|${model}|${text}|${extra}`);
   const buf = await crypto.subtle.digest('SHA-256', enc);
   return [...new Uint8Array(buf)].slice(0, 8).map(b => b.toString(16).padStart(2, '0')).join('');
 }
+
+// Delivery tuning: lower stability = more natural variation in pacing and
+// emphasis (less "announcer reading a list"); speaker boost keeps presence.
+const VOICE_SETTINGS = {
+  stability: 0.45,
+  similarity_boost: 0.75,
+  style: 0.2,
+  use_speaker_boost: true,
+};
 
 // Convert Blob → base64 data URL (works in any execution context, transferable
 // through chrome.scripting.executeScript args).
@@ -67,19 +78,27 @@ async function blobToDataUrl(blob) {
 
 // Fetch (or cache-hit) one narration. Returns { dataUrl, durationMs, fromCache, key }
 // Throws on network / API errors.
-export async function tts(text, { apiKey, voiceId, model }) {
+// opts.previousText / opts.nextText enable ElevenLabs request stitching: the
+// voice delivers this line as part of one continuous read (prosody flows
+// across clips) instead of each clip opening with fresh announcer energy.
+export async function tts(text, { apiKey, voiceId, model }, opts = {}) {
   if (!apiKey)  throw new Error('No API key — set in ⚙ ElevenLabs Settings');
   if (!voiceId) throw new Error('No voice ID — set in ⚙ ElevenLabs Settings');
-  const key = await cacheKey(voiceId, model, text);
+  const { previousText = null, nextText = null } = opts;
+  const key = await cacheKey(voiceId, model, text,
+    `${previousText || ''}|${nextText || ''}|v2`);
 
   let blob = await cacheGet(key);
   let fromCache = !!blob;
   if (!blob) {
     const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`;
+    const body = { text, model_id: model, voice_settings: VOICE_SETTINGS };
+    if (previousText) body.previous_text = previousText;
+    if (nextText)     body.next_text     = nextText;
     const resp = await fetch(url, {
       method: 'POST',
       headers: { 'xi-api-key': apiKey, 'Content-Type': 'application/json', 'accept': 'audio/mpeg' },
-      body: JSON.stringify({ text, model_id: model }),
+      body: JSON.stringify(body),
     });
     if (!resp.ok) {
       const err = await resp.text().catch(() => '');

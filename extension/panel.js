@@ -5,6 +5,8 @@
 // state = ready → user clicks Record.
 
 import { tts, getSettings, saveSettings, listVoices, cacheClear } from './lib/eleven.js';
+import { buildShotList, describeShotList } from './lib/shotlist.js';
+import { PRESETS, applyPreset, getPreset } from './lib/presets.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
@@ -122,7 +124,16 @@ window.addEventListener('message', (ev) => {
     if (bridgeReady) return; // ignore repeats
     bridgeReady = true;
     log('Generator bridge ready ✓', 'ok');
-    setTimeout(autoBootstrap, 400);
+    restoreAIConfig();
+    setTimeout(maybeBootstrap, 400);
+    return;
+  }
+  if (m.type === 'ai-config') {
+    // The sandboxed generator can't persist its script-writing provider/key
+    // (origin=null localStorage shim is in-memory) — we own persistence here.
+    chrome.storage.sync.set({ gen_ai_provider: m.provider || 'google', gen_ai_key: m.key || '' })
+      .then(() => log('AI script settings saved ✓', 'ok'))
+      .catch(() => {});
     return;
   }
   const pending = pendingReqs.get(m.id);
@@ -137,8 +148,43 @@ async function pickGeneratorScript() {
   return { name: r.name, item: { script: r.script, narrations: r.narrations || {} } };
 }
 
+// Push the persisted script-writing provider/key back into the (sandboxed,
+// storage-less) generator on every load.
+async function restoreAIConfig() {
+  try {
+    const { gen_ai_provider, gen_ai_key } = await chrome.storage.sync.get(['gen_ai_provider', 'gen_ai_key']);
+    if (!gen_ai_provider && !gen_ai_key) return;
+    const r = await sendToGenerator('set-ai-config', { provider: gen_ai_provider, key: gen_ai_key });
+    if (r.ok) log(`AI script key restored (${gen_ai_provider || 'google'}) ✓`, 'ok');
+    else log('AI key restore failed: ' + (r.error || 'unknown'), 'warn');
+  } catch (e) {
+    log('AI key restore failed: ' + e.message, 'warn');
+  }
+}
+
 // ─── Auto-bootstrap ─────────────────────────────────────────────────────────
+// Generator setup (Example 1 + AI timing + narrations) only matters for the
+// Build and Script tabs. Tour works straight off the live tab — it must NOT
+// load Example 1, so bootstrap waits for the first Build/Script activation.
 let bootstrapped = false;
+function maybeBootstrap() {
+  if (!bridgeReady || bootstrapped) return;
+  if (activeTabName === 'tour') return;
+  if (activeTabName === 'build') {
+    // One-click live Build: when the Comfy tab already has a graph, skip the
+    // Example-1 bootstrap — Record will read the live graph directly.
+    probeLiveGraph().then(hasGraph => {
+      if (hasGraph) {
+        if (currentStatus === 'setup') setState('ready');
+        log('Live graph detected — Record rebuilds it (no example needed)', 'ok');
+      } else {
+        autoBootstrap();
+      }
+    });
+    return;
+  }
+  autoBootstrap();
+}
 async function autoBootstrap() {
   if (bootstrapped) return;
   bootstrapped = true;
@@ -282,11 +328,41 @@ async function buildVoAudioMap({ source, narrations }) {
     const settings = await getSettings();
     const entries = Object.entries(narrations || {});
     log(`Fetching ${entries.length} clips from ElevenLabs (voice=${settings.voiceId})…`, 'info');
-    let hit = 0, miss = 0, fail = 0;
-    const results = await Promise.all(entries.map(async ([id, text]) => {
-      try { return { id, ok: true, ...(await tts(text, settings)) }; }
-      catch (e) { return { id, ok: false, err: e.message }; }
+
+    // ElevenLabs caps concurrent requests per subscription (6 on the user's
+    // plan; firing 58 at once 429'd 52 of them). Run a small worker pool and
+    // retry 429s with backoff — cached clips return instantly so the pool only
+    // throttles real API hits.
+    const POOL = 4;
+    async function ttsWithRetry(text, stitch, tries = 4) {
+      for (let attempt = 1; ; attempt++) {
+        try { return await tts(text, settings, stitch); }
+        catch (e) {
+          const retriable = /429|concurrent|rate.?limit|too many/i.test(e.message);
+          if (!retriable || attempt >= tries) throw e;
+          await new Promise(r => setTimeout(r, 1000 * attempt + Math.random() * 500));
+        }
+      }
+    }
+    const results = [];
+    let nextIdx = 0;
+    await Promise.all(Array.from({ length: Math.min(POOL, entries.length) }, async () => {
+      while (nextIdx < entries.length) {
+        const i = nextIdx++;
+        const [id, text] = entries[i];
+        // Request stitching: hand ElevenLabs the surrounding lines (entries are
+        // in playback order) so each clip is delivered as part of one
+        // continuous read, not a fresh start.
+        const stitch = {
+          previousText: entries[i - 1] ? entries[i - 1][1] : null,
+          nextText:     entries[i + 1] ? entries[i + 1][1] : null,
+        };
+        try { results.push({ id, ok: true, ...(await ttsWithRetry(text, stitch)) }); }
+        catch (e) { results.push({ id, ok: false, err: e.message }); }
+      }
     }));
+
+    let hit = 0, miss = 0, fail = 0;
     for (const r of results) {
       if (!r.ok) { fail++; log(`  ✗ ${r.id}: ${r.err}`, 'err'); continue; }
       map[r.id] = { audioKey: r.key, audioUrl: r.dataUrl, durationMs: r.durationMs };
@@ -308,41 +384,73 @@ async function probeDuration(url) {
 }
 
 // ─── Recording ───────────────────────────────────────────────────────────────
+// Capture quality knobs — preset/advanced controls write these to storage.
+// Defaults match the "Polished Demo" target: 1080p / 12 Mbps / 30fps.
+// 60fps is exposed as an advanced knob but tab capture tends to drop frames
+// at 60 on Retina displays — smoothness comes from easing, not fps.
+const CAPTURE_DEFAULTS = { bitrateMbps: 12, fps: 30, width: 1920, height: 1080 };
+async function getCaptureSettings() {
+  try {
+    const { capture } = await chrome.storage.sync.get(['capture']);
+    return { ...CAPTURE_DEFAULTS, ...(capture || {}) };
+  } catch (_) { return { ...CAPTURE_DEFAULTS }; }
+}
+
 async function startRecordingForTab(tabId, mode) {
+  const cap = await getCaptureSettings();
   let stream;
   if (mode === 'tab') {
-    log(`Tab capture for #${tabId}…`, 'info');
+    log(`Tab capture for #${tabId} (${cap.width}×${cap.height} @ ${cap.fps}fps)…`, 'info');
     const streamId = await new Promise((res, rej) => {
       chrome.tabCapture.getMediaStreamId({ targetTabId: tabId }, id => {
-        if (chrome.runtime.lastError) rej(new Error(chrome.runtime.lastError.message));
-        else res(id);
+        if (chrome.runtime.lastError) {
+          const m = chrome.runtime.lastError.message || 'tabCapture failed';
+          // Chrome grants tab capture per-tab, only on a toolbar-icon click
+          // while that tab is focused — and a reload clears the grant.
+          if (/not been invoked/i.test(m)) {
+            rej(new Error('Tab capture not authorized yet — focus the Comfy tab, click the ComfyUI Replay toolbar icon, then press Record again.'));
+          } else {
+            rej(new Error(m));
+          }
+        } else res(id);
       });
     });
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: streamId, maxFrameRate: 30 } },
+      video: { mandatory: {
+        chromeMediaSource: 'tab', chromeMediaSourceId: streamId,
+        maxFrameRate: cap.fps,
+        minWidth: cap.width,  maxWidth: cap.width,
+        minHeight: cap.height, maxHeight: cap.height,
+      } },
       audio: { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: streamId } },
     });
   } else if (mode === 'screen') {
     log('Picker mode — choose the Comfy tab + "Share tab audio"', 'warn');
     stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: 30 }, audio: true, selfBrowserSurface: 'exclude',
+      video: { frameRate: cap.fps, width: { ideal: cap.width }, height: { ideal: cap.height } },
+      audio: true, selfBrowserSurface: 'exclude',
     });
   } else return null;
 
   log(`Stream: ${stream.getVideoTracks().length}v / ${stream.getAudioTracks().length}a`, stream.getAudioTracks().length ? 'ok' : 'warn');
 
+  // Codec order matters for SMOOTHNESS, not just quality. Chrome encodes VP9
+  // in software and can't sustain 1080p — it silently drops to ~8fps. H.264
+  // (avc1) is hardware-accelerated on Mac; VP8's encoder is light enough to
+  // hold 30fps in software. VP9 is the choke point, so it's the last resort.
   const candidates = [
-    'video/webm;codecs=vp9,opus',
-    'video/webm;codecs=vp8,opus',
-    'video/webm',
-    'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+    'video/mp4;codecs=avc1.42E01E,mp4a.40.2', // h264 — hardware on Apple Silicon
     'video/mp4;codecs=avc1',
+    'video/webm;codecs=vp8,opus',             // fast software fallback
+    'video/webm;codecs=vp8',
+    'video/webm;codecs=vp9,opus',             // last resort — drops frames at 1080p
+    'video/webm',
   ];
   const mime = candidates.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
-  log(`MIME: ${mime}`);
+  log(`MIME: ${mime} · ${cap.bitrateMbps} Mbps`);
 
   const chunks = [];
-  const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 6_000_000 });
+  const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: cap.bitrateMbps * 1_000_000 });
   recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
   const stopped = new Promise(res => { recorder.onstop = res; });
   recorder.start(1000);
@@ -359,23 +467,11 @@ async function startRecordingForTab(tabId, mode) {
 }
 
 async function saveBlob(blob, suggestedName) {
-  try {
-    if (window.showSaveFilePicker) {
-      const baseMime = blob.type.split(';')[0].trim() || 'application/octet-stream';
-      const ext = baseMime === 'video/mp4' ? '.mp4' : baseMime === 'video/webm' ? '.webm' : '.' + (suggestedName.split('.').pop() || 'bin');
-      const handle = await window.showSaveFilePicker({
-        suggestedName,
-        types: [{ description: 'Video', accept: { [baseMime]: [ext] } }],
-      });
-      const w = await handle.createWritable();
-      await w.write(blob);
-      await w.close();
-      log(`Saved → ${handle.name}`, 'ok');
-      return;
-    }
-  } catch (e) {
-    if (e.name !== 'AbortError') log(`saveFilePicker: ${e.message}`, 'warn');
-  }
+  // NOTE: showSaveFilePicker() requires an active user gesture. A real
+  // recording runs for minutes, so by the time it finishes the gesture is
+  // long gone and the picker throws "Must be handling a user gesture". Don't
+  // even try it for recordings — go straight to the anchor download, which
+  // has no gesture requirement.
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = suggestedName;
@@ -413,26 +509,207 @@ async function waitForReplayDone({ tabId, total, onTick, timeoutMs = 10 * 60 * 1
   return { timeout: true };
 }
 
-// ─── Main click handler ─────────────────────────────────────────────────────
-let inFlight = false;
-let currentRec = null;
+// ─── Tour mode ───────────────────────────────────────────────────────────────
+// Survey the live graph → plan shots → write narrations (AI w/ template
+// fallback) → TTS → bake VO durations into shot dwells → record + inject.
 
-$('btn-record').addEventListener('click', async () => {
-  if (inFlight) { log('Already running', 'warn'); return; }
-  inFlight = true;
+async function surveyGraph() {
+  const r = await chrome.runtime.sendMessage({ type: 'survey-graph', tabId: cachedComfyTabId });
+  if (!r || !r.ok) throw new Error('survey failed: ' + (r && r.error));
+  if (!r.survey || !r.survey.ok) throw new Error('survey failed: ' + (r.survey && r.survey.error || 'no result'));
+  return r.survey;
+}
 
-  const voSource = $('opt-vo-source').value;
-  const recMode  = $('opt-record').value;
-
+// Debug helper — "Dump survey" button. Logs the survey + planned shot list
+// without recording anything.
+async function runSurveyDump() {
   try {
     if (!cachedComfyTabId) {
       await refreshComfyStatus();
       if (!cachedComfyTabId) throw new Error('No cloud.comfy.org tab open');
     }
+    const survey = await surveyGraph();
+    log(`Survey: ${survey.nodes.length} nodes · ${survey.groups.length} groups · ${survey.links.length} links`, 'ok');
+    for (const g of survey.groups) log(`  group "${g.title}" @ [${g.bounding.map(v => Math.round(v)).join(', ')}]`);
+    const shots = buildShotList(survey);
+    log('Shot list:\n' + describeShotList(shots), 'info');
+    console.log('[tour] survey', survey, 'shots', shots);
+  } catch (e) {
+    log('Survey dump failed: ' + e.message, 'err');
+  }
+}
 
-    // Auto-switch to Record tab so the user always sees progress
-    activateTab('record');
+async function runTour({ voSource, recMode }) {
+  setState('recording', 'Surveying graph…');
+  const survey = await surveyGraph();
+  log(`Survey: ${survey.nodes.length} nodes · ${survey.groups.length} groups`, 'ok');
+  if (!survey.nodes.length) throw new Error('Graph is empty — open a workflow in the Comfy tab first');
 
+  const tourOpts = await getTourOptions();
+  // Pre-flight the ending: 'prerun' needs an existing rendered output in the
+  // graph. If there is none, fall back to 'none' — never silently queue a
+  // live job (credits + the queue-rejection failure mode).
+  let ending = tourOpts.ending;
+  if (ending === 'prerun' && !survey.nodes.some(n => n.hasImage)) {
+    log('No pre-run output found in the graph — run the workflow once first. Ending at the overview instead.', 'warn');
+    ending = 'none';
+  }
+  const shots = buildShotList(survey, { ending });
+  log(`Planned ${shots.length} shots · ending: ${ending}`, 'ok');
+
+  // Narrations: AI via the generator bridge (30s budget), templates on miss
+  let narrations = {};
+  if (voSource !== 'none' && !bridgeReady) {
+    log('Generator bridge not ready yet — recording without VO', 'warn');
+  } else if (voSource !== 'none') {
+    setState('recording', 'Writing narration…');
+    try {
+      const r = await sendToGenerator('write-tour-narrations', { survey, shots }, { timeoutMs: 30000 });
+      if (r.ok && r.narrations) {
+        narrations = r.narrations;
+        log(`Narration: ${Object.keys(narrations).length} lines (${r.narrationSource})${r.error ? ' — AI error: ' + r.error : ''}`,
+            r.narrationSource === 'ai' ? 'ok' : 'warn');
+      } else throw new Error(r.error || 'no narrations');
+    } catch (e) {
+      log('Narration bridge failed (' + e.message + ') — recording without VO', 'warn');
+    }
+  }
+
+  // TTS — then bake real clip durations into the shot dwells so the camera
+  // pacing is decided at PLAN time, before injection.
+  let voAudio = {};
+  if (Object.keys(narrations).length && voSource === 'elevenlabs') {
+    setState('recording', 'Fetching voice clips…');
+    voAudio = await buildVoAudioMap({ source: 'elevenlabs', narrations });
+    // Stash the raw clip length per shot; the runner owns pacing now (fits the
+    // camera move to the line and overlaps the next beat into its tail). Do
+    // NOT inflate minDwellMs here — that re-creates the talk-stop-talk hold.
+    for (const shot of shots) {
+      const clip = voAudio[shot.voId];
+      if (clip) shot.clipMs = clip.durationMs;
+    }
+  }
+
+  setState('recording', 'Focusing tab…');
+  await chrome.runtime.sendMessage({ type: 'focus-comfy' });
+  await new Promise(r => setTimeout(r, 400));
+
+  setState('recording', 'Starting capture…');
+  currentRec = await startRecordingForTab(cachedComfyTabId, recMode);
+
+  setState('recording');
+  showProgress();
+
+  log('Injecting tour…', 'info');
+  const injRes = await chrome.runtime.sendMessage({
+    type: 'inject-tour', tabId: cachedComfyTabId,
+    input: {
+      shots,
+      voAudio: Object.fromEntries(Object.entries(voAudio).map(([id, v]) => [id, { audioUrl: v.audioUrl, durationMs: v.durationMs }])),
+      opts: { cursorSize: tourOpts.cursorSize, arc: tourOpts.arc !== false, executionTimeoutMs: 10 * 60 * 1000 },
+    },
+  });
+  if (!injRes || !injRes.ok) throw new Error('inject-tour failed: ' + (injRes && injRes.error));
+
+  let lastIdx = 0;
+  const result = await waitForReplayDone({
+    tabId: cachedComfyTabId, total: shots.length,
+    timeoutMs: 15 * 60 * 1000,
+    onTick: (state, ms) => {
+      const idx = state.beatIdx || lastIdx;
+      if (idx > lastIdx) lastIdx = idx;
+      updateProgress({ beat: state.beatLabel || `Shot ${idx}`, idx, total: shots.length, elapsedMs: ms });
+      // Cloud renders can take minutes of static screen — pause the recorder
+      // for the wait so the video cuts straight from "Run" to the result.
+      const rec = currentRec && currentRec.recorder;
+      if (rec) {
+        try {
+          if (state.phase === 'waiting' && rec.state === 'recording') {
+            rec.pause();
+            log('Recording paused — waiting for the cloud render…', 'info');
+          } else if (state.phase !== 'waiting' && rec.state === 'paused') {
+            rec.resume();
+            log('Recording resumed — result is in ✓', 'ok');
+          }
+        } catch (e) { log('recorder pause/resume: ' + e.message, 'warn'); }
+      }
+    },
+  });
+  if (result.timeout) throw new Error('tour timed out');
+  if (result.err) log('Tour finished with error: ' + result.err, 'warn');
+  // Safety: never leave the recorder paused (e.g., tour ended mid-wait).
+  try { if (currentRec && currentRec.recorder.state === 'paused') currentRec.recorder.resume(); } catch (_) {}
+}
+
+async function getTourOptions() {
+  let tour = {};
+  try { ({ tour = {} } = await chrome.storage.sync.get(['tour'])); } catch (_) {}
+  const opts = { cursorSize: 20, arc: true, ...(tour || {}) };
+  // Ending migration: old boolean runWorkflow → 'live'/'none'; fresh installs
+  // default to 'prerun' (close on the already-saved output, no live run).
+  if (!opts.ending) {
+    if (typeof opts.runWorkflow === 'boolean') opts.ending = opts.runWorkflow ? 'live' : 'none';
+    else opts.ending = 'prerun';
+  }
+  return opts;
+}
+
+// ─── One-click live Build ────────────────────────────────────────────────────
+// Tour-style: read the workflow ALREADY OPEN in the Comfy tab (LiteGraph
+// serialize → same JSON shape as a dropped file), load it into the generator,
+// write narration, then run the standard Build pipeline. No JSON drop, no
+// Example bootstrap.
+
+async function probeLiveGraph() {
+  try {
+    if (!cachedComfyTabId) await refreshComfyStatus();
+    if (!cachedComfyTabId) return false;
+    const r = await chrome.runtime.sendMessage({ type: 'probe', tabId: cachedComfyTabId });
+    return !!(r && r.ok && r.result && r.result.nodes > 0);
+  } catch (_) { return false; }
+}
+
+async function serializeLiveGraph() {
+  const r = await chrome.runtime.sendMessage({ type: 'serialize-graph', tabId: cachedComfyTabId });
+  const res = r && r.ok ? r.result : null;
+  if (!res || !res.ok) throw new Error('serialize failed: ' + ((res && res.error) || (r && r.error) || 'unknown'));
+  return res;
+}
+
+async function runBuildLive({ voSource, recMode }) {
+  setState('recording', 'Reading live graph…');
+  const live = await serializeLiveGraph();
+  if (!live.nodeCount) throw new Error('Live graph is empty — open a workflow first');
+  log(`Live graph: ${live.nodeCount} nodes — loading into generator…`, 'ok');
+
+  const name = 'live-' + (live.title || 'workflow').replace(/[^\w-]+/g, '_').slice(0, 40) + '.json';
+  const r = await sendToGenerator('load-json', { text: JSON.stringify(live.workflow), filename: name });
+  if (!r.ok) throw new Error('generator load failed: ' + (r.error || 'unknown'));
+  await new Promise(res => setTimeout(res, 700));
+  await sendToGenerator('set-toggle', { elementId: 'ai-timing-toggle', checked: true }).catch(() => {});
+
+  setState('recording', 'Writing narration…');
+  try { await sendToGenerator('click-ai-script'); }
+  catch (e) { log('AI script trigger: ' + e.message, 'warn'); }
+  // The AI call can take a while on big graphs — poll until narrations land
+  // (the no-key template fallback lands almost immediately).
+  const t0 = Date.now();
+  let narrCount = 0;
+  while (Date.now() - t0 < 90_000) {
+    await new Promise(res => setTimeout(res, 1500));
+    try {
+      const s = await sendToGenerator('get-script');
+      narrCount = s.ok && s.narrations ? Object.keys(s.narrations).length : 0;
+      if (narrCount > 0) break;
+    } catch (_) { /* keep polling */ }
+  }
+  log(narrCount ? `Narration ready: ${narrCount} lines` : 'No narrations after 90s — building without VO pacing', narrCount ? 'ok' : 'warn');
+
+  await runBuild({ voSource, recMode });
+}
+
+// ─── Build mode (v0.6 generator-script flow) ─────────────────────────────────
+async function runBuild({ voSource, recMode }) {
     setState('recording', 'Preparing…');
     const { name, item } = await pickGeneratorScript();
     log(`Script: "${name}" — ${item.script.length}B · ${Object.keys(item.narrations).length} narrations`);
@@ -461,6 +738,9 @@ $('btn-record').addEventListener('click', async () => {
     let lastIdx = 0;
     const result = await waitForReplayDone({
       tabId: cachedComfyTabId, total: totalBeats,
+      // A narrated beat runs ~10-25s (VO + camera + typing). 10 minutes was
+      // killing a 58-beat build mid-recording — scale with the beat count.
+      timeoutMs: Math.max(10 * 60 * 1000, totalBeats * 30_000),
       onTick: (state, ms) => {
         const idx = state.beatIdx || lastIdx;
         if (idx > lastIdx) lastIdx = idx;
@@ -471,6 +751,37 @@ $('btn-record').addEventListener('click', async () => {
       },
     });
     if (result.timeout) throw new Error('replay timed out');
+}
+
+// ─── Main recording flow — dispatches by active mode ─────────────────────────
+// Shared by the Record button and the debug Test Tour button.
+let inFlight = false;
+let currentRec = null;
+
+async function startRecordingFlow() {
+  if (inFlight) { log('Already running', 'warn'); return; }
+  inFlight = true;
+
+  const mode = currentMode(); // 'tour' | 'build'
+  const voSource = mode === 'tour' ? $('opt-tour-vo').value : $('opt-vo-source').value;
+  const recMode  = mode === 'tour' ? $('opt-tour-record').value : $('opt-record').value;
+
+  try {
+    if (!cachedComfyTabId) {
+      await refreshComfyStatus();
+      if (!cachedComfyTabId) throw new Error('No cloud.comfy.org tab open');
+    }
+
+    if (mode === 'tour') {
+      await runTour({ voSource, recMode });
+    } else if (!droppedWorkflow && await probeLiveGraph()) {
+      // One-click: rebuild the workflow already open in the Comfy tab. A
+      // deliberately dropped JSON takes precedence over the live graph.
+      log('Build source: live graph (drop a JSON to override)', 'info');
+      await runBuildLive({ voSource, recMode });
+    } else {
+      await runBuild({ voSource, recMode });
+    }
 
     setState('saving', 'Finalizing…');
     await new Promise(r => setTimeout(r, 1500)); // tail capture
@@ -480,7 +791,7 @@ $('btn-record').addEventListener('click', async () => {
       log(`Blob: ${(blob.size/1024/1024).toFixed(2)} MB (${blob.type})`, 'ok');
       const ext = blob.type.includes('mp4') ? 'mp4' : 'webm';
       const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      await saveBlob(blob, `comfyui-replay-${ts}.${ext}`);
+      await saveBlob(blob, `comfyui-${mode}-${ts}.${ext}`);
     }
     setState('done');
   } catch (e) {
@@ -494,6 +805,35 @@ $('btn-record').addEventListener('click', async () => {
     currentRec = null;
     inFlight = false;
     hideProgress();
+  }
+}
+
+$('btn-record').addEventListener('click', startRecordingFlow);
+
+// ─── Debug: Test Tour — load the bundled SkyReplacement workflow into the
+//     live tab, then run the full tour automatically. One click, zero setup.
+$('btn-test-tour').addEventListener('click', async () => {
+  if (inFlight) { log('Already running', 'warn'); return; }
+  try {
+    if (!cachedComfyTabId) {
+      await refreshComfyStatus();
+      if (!cachedComfyTabId) throw new Error('No cloud.comfy.org tab open');
+    }
+    activateTab('tour');
+    setState('setup', 'Loading test workflow…');
+    log('Test Tour: loading SkyReplacement fixture into the Comfy tab…', 'info');
+    const wf = await (await fetch(chrome.runtime.getURL('fixtures/skyreplacement.json'))).json();
+    const r = await chrome.runtime.sendMessage({ type: 'load-workflow', tabId: cachedComfyTabId, workflow: wf });
+    const res = r && r.ok ? r.result : null;
+    if (!res || !res.ok) throw new Error('workflow load failed: ' + ((res && res.error) || (r && r.error) || 'unknown'));
+    log(`Loaded: ${res.nodes} nodes ✓ — settling…`, 'ok');
+    // Let the frontend finish layout/previews before the survey runs.
+    await new Promise(s => setTimeout(s, 2000));
+    setState('ready');
+    await startRecordingFlow();
+  } catch (e) {
+    setState('error', e.message.slice(0, 30));
+    log('Test Tour failed: ' + e.message, 'err');
   }
 });
 
@@ -667,6 +1007,9 @@ const cfOptionControls = [
   { id: 'cf-vo-captions',   target: 'vo-captions-toggle',  kind: 'toggle' },
   { id: 'cf-ai-timing',     target: 'ai-timing-toggle',    kind: 'toggle' },
 
+  // Replay options (always visible) — Click Effects
+  { id: 'cf-click-fx',      target: 'click-fx-toggle',     kind: 'toggle' },
+
   // Debug Options
   { id: 'cf-debug-log',     target: 'show-debug-log-toggle', kind: 'toggle' },
 ];
@@ -678,6 +1021,7 @@ function wireOptionControl(spec) {
     el.addEventListener('click', () => {
       const next = el.getAttribute('aria-checked') !== 'true';
       el.setAttribute('aria-checked', next ? 'true' : 'false');
+      markCustom('build');
       sendToGenerator('set-toggle', { elementId: spec.target, checked: next })
         .catch(e => log(`set-toggle ${spec.target}: ${e.message}`, 'warn'));
     });
@@ -688,12 +1032,14 @@ function wireOptionControl(spec) {
     };
     el.addEventListener('input', () => {
       updateValueLabel();
+      markCustom('build');
       sendToGenerator('set-range', { elementId: spec.target, value: el.value })
         .catch(e => log(`set-range ${spec.target}: ${e.message}`, 'warn'));
     });
     updateValueLabel();
   } else if (spec.kind === 'select') {
     el.addEventListener('change', () => {
+      markCustom('build');
       sendToGenerator('set-value', { elementId: spec.target, value: el.value })
         .catch(e => log(`set-value ${spec.target}: ${e.message}`, 'warn'));
     });
@@ -725,6 +1071,133 @@ async function syncOptionsFromGenerator() {
 }
 
 for (const spec of cfOptionControls) wireOptionControl(spec);
+
+// ─── Presets — one knob that sets many ───────────────────────────────────────
+// Storage-backed knobs (capture/tour) apply via lib/presets.js; Build-mode
+// generator options dispatch over the iframe bridge, then the accordion
+// mirrors re-sync. Touching any individual knob flips the picker to Custom.
+const presetSelTour  = $('preset-tour');
+const presetSelBuild = $('preset-build');
+
+function markCustom(mode) {
+  const sel = mode === 'tour' ? presetSelTour : presetSelBuild;
+  if (!sel || sel.value === 'custom') return;
+  sel.value = 'custom';
+  chrome.storage.sync.set({ ['preset_' + mode]: 'custom' }).catch(() => {});
+}
+
+async function patchStorage(key, patch) {
+  const cur = (await chrome.storage.sync.get([key]))[key] || {};
+  await chrome.storage.sync.set({ [key]: { ...cur, ...patch } });
+}
+
+async function syncTourControlsFromStorage() {
+  const cap = await getCaptureSettings();
+  const tour = await getTourOptions();
+  $('cap-bitrate').value = cap.bitrateMbps;
+  $('cap-bitrate-value').textContent = cap.bitrateMbps + ' Mbps';
+  $('cap-fps').value = String(cap.fps);
+  $('tour-cursor-size').value = tour.cursorSize;
+  $('tour-cursor-size-value').textContent = tour.cursorSize + 'px';
+  $('tour-ending').value = tour.ending;
+  $('tour-arc-toggle').setAttribute('aria-checked', tour.arc !== false ? 'true' : 'false');
+}
+
+async function onPresetChange(mode) {
+  const sel = mode === 'tour' ? presetSelTour : presetSelBuild;
+  const id = sel.value;
+  try {
+    if (id === 'custom') {
+      await chrome.storage.sync.set({ ['preset_' + mode]: 'custom' });
+      return;
+    }
+    const p = await applyPreset(id, mode);
+    if (mode === 'tour') {
+      if (p.tourVo) $('opt-tour-vo').value = p.tourVo;
+      await syncTourControlsFromStorage();
+    } else {
+      if (p.buildVo) $('opt-vo-source').value = p.buildVo;
+      for (const [target, op] of Object.entries(p.build || {})) {
+        const [type, payload] = op.kind === 'toggle'
+          ? ['set-toggle', { elementId: target, checked: !!op.value }]
+          : [op.kind === 'range' ? 'set-range' : 'set-value', { elementId: target, value: op.value }];
+        try { await sendToGenerator(type, payload); }
+        catch (e) { log(`preset → ${target}: ${e.message}`, 'warn'); }
+      }
+      await syncOptionsFromGenerator();
+    }
+    log(`Preset applied: ${p.label}`, 'ok');
+  } catch (e) {
+    log('Preset failed: ' + e.message, 'err');
+  }
+}
+
+presetSelTour.addEventListener('change', () => onPresetChange('tour'));
+presetSelBuild.addEventListener('change', () => onPresetChange('build'));
+
+// Tour engine + capture-quality knobs (storage-backed; flip preset → Custom)
+function wireTourToggle(id, key) {
+  $(id).addEventListener('click', async () => {
+    const el = $(id);
+    const next = el.getAttribute('aria-checked') !== 'true';
+    el.setAttribute('aria-checked', next ? 'true' : 'false');
+    markCustom('tour');
+    await patchStorage('tour', { [key]: next });
+  });
+}
+wireTourToggle('tour-arc-toggle', 'arc');
+
+$('tour-ending').addEventListener('change', async () => {
+  markCustom('tour');
+  await patchStorage('tour', { ending: $('tour-ending').value });
+});
+
+$('tour-cursor-size').addEventListener('input', async () => {
+  const v = parseInt($('tour-cursor-size').value, 10);
+  $('tour-cursor-size-value').textContent = v + 'px';
+  markCustom('tour');
+  await patchStorage('tour', { cursorSize: v });
+});
+$('cap-bitrate').addEventListener('input', async () => {
+  const v = parseInt($('cap-bitrate').value, 10);
+  $('cap-bitrate-value').textContent = v + ' Mbps';
+  markCustom('tour');
+  await patchStorage('capture', { bitrateMbps: v });
+});
+$('cap-fps').addEventListener('change', async () => {
+  markCustom('tour');
+  await patchStorage('capture', { fps: parseInt($('cap-fps').value, 10) });
+});
+$('opt-tour-vo').addEventListener('change', () => markCustom('tour'));
+$('opt-vo-source').addEventListener('change', () => markCustom('build'));
+
+// Restore preset selections; seed Polished Demo defaults on first run
+(async () => {
+  try {
+    const { preset_tour, preset_build } = await chrome.storage.sync.get(['preset_tour', 'preset_build']);
+    if (!preset_tour) await applyPreset('polished-demo', 'tour');
+    presetSelTour.value = preset_tour || 'polished-demo';
+    presetSelBuild.value = preset_build || 'polished-demo';
+    await syncTourControlsFromStorage();
+  } catch (e) {
+    log('Preset init: ' + e.message, 'warn');
+  }
+})();
+
+// ─── Tour debug + window-prep buttons ────────────────────────────────────────
+$('btn-survey-dump').addEventListener('click', runSurveyDump);
+
+$('btn-prep-window').addEventListener('click', async () => {
+  log('Resizing Comfy window for a 1920×1080 viewport…', 'info');
+  try {
+    const r = await chrome.runtime.sendMessage({ type: 'prepare-window', width: 1920, height: 1080 });
+    if (r && r.ok) log(`Viewport: ${r.viewport.w}×${r.viewport.h} ✓`, 'ok');
+    else if (r && r.viewport) log(`Viewport landed at ${r.viewport.w}×${r.viewport.h} (display may be too small)`, 'warn');
+    else log('Resize failed: ' + (r && r.error || 'unknown'), 'err');
+  } catch (e) {
+    log('prepare-window failed: ' + e.message, 'err');
+  }
+});
 
 // Use Example buttons → trigger generator's loadExampleWorkflow
 const exBtn = document.getElementById('cf-use-example');
@@ -764,12 +1237,17 @@ const dropBrowse = document.getElementById('drop-browse');
 const wfName     = document.getElementById('wf-name');
 const wfMeta     = document.getElementById('wf-meta');
 
+// Set when the user deliberately drops/browses a workflow JSON — Build then
+// uses it instead of the live graph.
+let droppedWorkflow = false;
+
 async function loadWorkflowFromText(text, filename) {
   const r = await sendToGenerator('load-json', { text, filename });
   if (!r.ok) {
     log('Workflow load failed: ' + (r.error || 'unknown'), 'err');
     return false;
   }
+  droppedWorkflow = true;
   log(`Workflow loaded: ${r.name}`, 'ok');
   // Generator's processFile is async — wait a beat then refresh the status
   await new Promise(r => setTimeout(r, 700));
@@ -808,8 +1286,8 @@ dropZone.addEventListener('click', (e) => {
   dropInput.click();
 });
 
-// Drag-drop on the zone (and the entire Record pane for forgiveness)
-for (const target of [dropZone, document.getElementById('pane-record')]) {
+// Drag-drop on the zone (and the entire Build pane for forgiveness)
+for (const target of [dropZone, document.getElementById('pane-build')]) {
   target.addEventListener('dragover', (e) => {
     e.preventDefault();
     dropZone.classList.add('dragover');
@@ -853,7 +1331,14 @@ async function refreshWorkflowStatus() {
 }
 
 // ─── Tab switcher ────────────────────────────────────────────────────────────
+// activeMode is the RECORDING mode ('tour' | 'build') — it sticks when the
+// user visits the Script tab, so Record still does the right thing.
+let activeTabName = 'tour';
+let activeMode = 'tour';
+function currentMode() { return activeMode; }
+
 function activateTab(name) {
+  activeTabName = name;
   for (const btn of document.querySelectorAll('.tab-btn')) {
     const on = btn.dataset.tab === name;
     btn.classList.toggle('active', on);
@@ -862,6 +1347,13 @@ function activateTab(name) {
   for (const pane of document.querySelectorAll('.tab-pane')) {
     pane.classList.toggle('active', pane.id === 'pane-' + name);
   }
+  if (name === 'tour' || name === 'build') {
+    activeMode = name;
+    if (!inFlight) $('btn-record').textContent = name === 'tour' ? '▶ Record Tour' : '▶ Record Build';
+  }
+  // Record/Stop/progress only make sense for the recording modes
+  $('action-bar').classList.toggle('hidden', name === 'script');
+  maybeBootstrap();
 }
 for (const btn of document.querySelectorAll('.tab-btn')) {
   btn.addEventListener('click', () => {
@@ -880,5 +1372,9 @@ async function refreshScriptBadge() {
 
 // ─── Boot ────────────────────────────────────────────────────────────────────
 $('gen-frame').addEventListener('load', () => { log('Generator iframe loaded', 'info'); });
-setState('setup');
-log('Panel ready · v0.5', 'ok');
+// Tour is the default mode and needs no generator setup — ready immediately.
+// Switching to Build/Script triggers the example bootstrap (maybeBootstrap).
+setState('ready');
+const EXT_VERSION = chrome.runtime.getManifest().version;
+$('hdr-version').textContent = 'v' + EXT_VERSION;
+log(`Panel ready · v${EXT_VERSION}`, 'ok');
